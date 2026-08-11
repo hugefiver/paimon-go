@@ -1,0 +1,158 @@
+# Sonic-compatible JSON replacement
+
+This repository provides a source-compatible replacement for
+`github.com/bytedance/sonic` targeting the Sonic `v1.15.2` public API. Use it
+from a consuming module by keeping your existing Sonic imports and adding a
+`replace` directive:
+
+```go
+require github.com/bytedance/sonic v1.15.2
+
+replace github.com/bytedance/sonic => <path-to-this-checkout>
+```
+
+The goal is API/source compatibility for users that need a portable
+implementation. It does **not** promise performance close to upstream Sonic's
+native/JIT implementation.
+
+## Backends and import paths
+
+- **Root package (`github.com/bytedance/sonic`)**: the default backend uses
+  fastjson-oriented behavior for raw JSON operations such as `Valid`, `Get`,
+  AST parsing, path lookup, and raw JSON handling. Arbitrary Go value
+  reflection (`Marshal`, `Unmarshal`, encoders, and decoders) falls back to the
+  standard `encoding/json` v1 APIs.
+- **`github.com/bytedance/sonic/fastjson`**: an explicit thin wrapper around
+  the root package. Its exported types are aliases of the root types and its
+  functions forward to the root implementation.
+- **`github.com/bytedance/sonic/stdjsonv2`**: an explicit experimental backend.
+  By default it is a disabled stub that compiles everywhere and returns
+  `ErrJSONv2ExperimentDisabled` from operational APIs. A real backend is built
+  only when the Go toolchain provides `encoding/json/v2` and
+  `encoding/json/jsontext` and tests/builds run with
+  `$env:GOEXPERIMENT = "jsonv2"`.
+
+`github.com/bytedance/sonic/loader` is out of scope for this replacement.
+
+## Basic usage
+
+Existing code can keep importing Sonic:
+
+```go
+package main
+
+import (
+    "bytes"
+    "fmt"
+    "strings"
+
+    "github.com/bytedance/sonic"
+)
+
+type User struct {
+    Name string `json:"name"`
+    Age  int    `json:"age"`
+}
+
+func main() {
+    data, err := sonic.Marshal(User{Name: "Ada", Age: 37})
+    if err != nil {
+        panic(err)
+    }
+    fmt.Println(string(data))
+
+    var user User
+    if err := sonic.Unmarshal(data, &user); err != nil {
+        panic(err)
+    }
+    fmt.Println(user.Name)
+
+    fmt.Println(sonic.Valid([]byte(`{"name":"Ada","age":37}`)))
+
+    node, err := sonic.Get([]byte(`{"users":[{"name":"Ada"}]}`), "users", 0, "name")
+    if err != nil {
+        panic(err)
+    }
+    text, _ := node.String()
+    fmt.Println(text)
+
+    var out bytes.Buffer
+    enc := sonic.ConfigDefault.NewEncoder(&out)
+    if err := enc.Encode(User{Name: "Grace", Age: 85}); err != nil {
+        panic(err)
+    }
+
+    dec := sonic.ConfigDefault.NewDecoder(strings.NewReader(out.String()))
+    var decoded User
+    if err := dec.Decode(&decoded); err != nil {
+        panic(err)
+    }
+    fmt.Println(decoded.Name)
+}
+```
+
+The `fastjson` subpackage can be used in the same style when downstream code
+imports that path directly:
+
+```go
+import sonicfast "github.com/bytedance/sonic/fastjson"
+
+ok := sonicfast.Valid([]byte(`{"ok":true}`))
+_ = ok
+```
+
+The `stdjsonv2` subpackage should be treated as opt-in and experimental:
+
+```go
+import "github.com/bytedance/sonic/stdjsonv2"
+
+data, err := stdjsonv2.Marshal(map[string]bool{"ok": true})
+if err == stdjsonv2.ErrJSONv2ExperimentDisabled {
+    // Build or test without GOEXPERIMENT=jsonv2; use another backend.
+}
+_ = data
+```
+
+## Validation and comparison commands
+
+Run these from the repository root unless a subdirectory is shown.
+
+```powershell
+go test ./... -count=1
+```
+
+Run the full test suite with the jsonv2 experiment enabled:
+
+```powershell
+$env:GOEXPERIMENT = "jsonv2"; go test ./... -count=1
+```
+
+Root package fuzz smoke:
+
+```powershell
+go test . -run=Fuzz -fuzz=FuzzValidParity -fuzztime=30s
+```
+
+Differential fuzz smoke against upstream Sonic v1.15.2:
+
+```powershell
+Push-Location .\difftest
+go test -run=Fuzz -fuzz=FuzzUpstreamSonicParity -fuzztime=10s
+Pop-Location
+```
+
+Benchmark comparison smoke:
+
+```powershell
+Push-Location .\bench
+pwsh -NoProfile -File .\run.ps1
+Pop-Location
+```
+
+The benchmark runner prints reproducible side-by-side measurements for the
+local root/default backend, the local `stdjsonv2` backend, and upstream Sonic
+v1.15.2. These numbers are for comparison only; this project does not claim to
+match upstream Sonic performance.
+
+See [`docs/compatibility.md`](docs/compatibility.md) for detailed behavior and
+known differences.
