@@ -6,11 +6,13 @@ import (
 	"testing"
 
 	"github.com/bytedance/sonic"
-	vfastjson "github.com/valyala/fastjson"
+	"github.com/bytedance/sonic/internal/compatmode"
+	"github.com/bytedance/sonic/internal/fastjsoncompat"
 )
 
-// FuzzValidParity compares sonic.Valid(data) with fastjson validation because
-// the root backend intentionally follows Sonic's permissive raw JSON parser.
+// FuzzValidParity compares sonic.Valid(data) with the selected raw JSON mode.
+// The default mode accepts Sonic-compatible raw control bytes inside strings,
+// but keeps the rest of the document under strict JSON token validation.
 func FuzzValidParity(f *testing.F) {
 	seeds := []string{
 		``,
@@ -37,6 +39,10 @@ func FuzzValidParity(f *testing.F) {
 		`"\ud83d\ude00"`,
 		`"\ud83d"`,
 		`{"a":1}extra`,
+		`{"a":01}`,
+		`{"a":1.}`,
+		`{"a":1e}`,
+		`{"a":+1}`,
 		`   {"a":1}   `,
 		"\xff\xfe",
 		"\x00",
@@ -48,11 +54,17 @@ func FuzzValidParity(f *testing.F) {
 
 	f.Fuzz(func(t *testing.T, data []byte) {
 		gotSonic := sonic.Valid(data)
-		var p vfastjson.Parser
-		_, err := p.Parse(string(data))
-		gotFastjson := len(data) > 0 && err == nil
-		if gotSonic != gotFastjson {
-			t.Fatalf("Valid mismatch: sonic=%v fastjson=%v data=%q", gotSonic, gotFastjson, data)
+		if compatmode.StdJSON {
+			want := len(data) > 0 && json.Valid(data)
+			if gotSonic != want {
+				t.Fatalf("Valid mismatch: sonic=%v want stdjson=%v data=%q", gotSonic, want, data)
+			}
+			return
+		} else {
+			want := fastjsoncompat.Valid(data)
+			if gotSonic != want {
+				t.Fatalf("Valid mismatch: sonic=%v want sonic-compatible oracle=%v data=%q", gotSonic, want, data)
+			}
 		}
 	})
 }

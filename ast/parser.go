@@ -105,7 +105,11 @@ func fastjsonValueToNode(v *vfastjson.Value) (Node, nativetypes.ParsingError) {
 	case vfastjson.TypeNumber:
 		// fastjson's Value.String() for a TypeNumber value returns the
 		// raw number literal (MarshalTo appends v.s verbatim for numbers).
-		return NewNumber(v.String()), 0
+		num, ok := sonicNumberLiteral(v.String())
+		if !ok {
+			return Node{}, nativetypes.ERR_INVALID_NUMBER_FMT
+		}
+		return NewNumber(num), 0
 	case vfastjson.TypeArray:
 		arr, err := v.Array()
 		if err != nil {
@@ -126,7 +130,11 @@ func fastjsonValueToNode(v *vfastjson.Value) (Node, nativetypes.ParsingError) {
 			return Node{}, nativetypes.ERR_INVALID_CHAR
 		}
 		var pairs []Pair
+		var firstErr nativetypes.ParsingError
 		obj.Visit(func(k []byte, ev *vfastjson.Value) {
+			if firstErr != 0 {
+				return
+			}
 			if code := func() nativetypes.ParsingError {
 				n, code := fastjsonValueToNode(ev)
 				if code != 0 {
@@ -135,15 +143,66 @@ func fastjsonValueToNode(v *vfastjson.Value) (Node, nativetypes.ParsingError) {
 				pairs = append(pairs, NewPair(string(k), n))
 				return 0
 			}(); code != 0 {
-				// On error we cannot stop Visit but the returned pairs
-				// slice will be discarded by the caller; record nothing
-				// here because the upstream caller checks separately.
-				_ = code
+				firstErr = code
 			}
 		})
+		if firstErr != 0 {
+			return Node{}, firstErr
+		}
 		return NewObject(pairs), 0
 	}
 	return Node{typ: V_ERROR, exists: true, loaded: true, err: fmt.Errorf("unknown fastjson type %d", v.Type())}, nativetypes.ERR_INVALID_CHAR
+}
+
+func sonicNumberLiteral(lit string) (string, bool) {
+	if lit == "" {
+		return "", false
+	}
+	i := 0
+	if lit[i] == '-' {
+		i++
+		if i == len(lit) {
+			return "", false
+		}
+	}
+	intStart := i
+	if lit[i] == '0' {
+		i++
+		if i < len(lit) && lit[i] >= '0' && lit[i] <= '9' {
+			return lit[:i], true
+		}
+	} else if lit[i] >= '1' && lit[i] <= '9' {
+		for i < len(lit) && lit[i] >= '0' && lit[i] <= '9' {
+			i++
+		}
+	} else {
+		return "", false
+	}
+	if i < len(lit) && lit[i] == '.' {
+		i++
+		if i == len(lit) || lit[i] < '0' || lit[i] > '9' {
+			return "", false
+		}
+		for i < len(lit) && lit[i] >= '0' && lit[i] <= '9' {
+			i++
+		}
+	}
+	if i < len(lit) && (lit[i] == 'e' || lit[i] == 'E') {
+		i++
+		if i < len(lit) && (lit[i] == '+' || lit[i] == '-') {
+			i++
+		}
+		if i == len(lit) || lit[i] < '0' || lit[i] > '9' {
+			return "", false
+		}
+		for i < len(lit) && lit[i] >= '0' && lit[i] <= '9' {
+			i++
+		}
+	}
+	if i != len(lit) || i == intStart {
+		return "", false
+	}
+	return lit, true
 }
 
 // mapFastjsonError converts a fastjson parse error into a Sonic-shaped

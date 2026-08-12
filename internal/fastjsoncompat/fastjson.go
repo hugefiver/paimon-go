@@ -9,22 +9,33 @@
 package fastjsoncompat
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
+	"math"
+	"strconv"
 
 	"github.com/bytedance/sonic/ast"
+	"github.com/bytedance/sonic/internal/compatmode"
 	nativetypes "github.com/bytedance/sonic/internal/native/types"
 	vfastjson "github.com/valyala/fastjson"
 )
 
-// Valid reports whether data is a single well-formed JSON value. It is
-// a thin wrapper over fastjson.Validate.
+// Valid reports whether data is a single well-formed JSON value. The fast path
+// uses fastjson's allocation-free validator. Sonic accepts raw control bytes
+// inside strings, while fastjson.ValidateBytes rejects them, so those rare
+// inputs fall back to Parser.ParseBytes to preserve Sonic-compatible behavior.
 func Valid(data []byte) bool {
 	if len(data) == 0 {
 		return false
 	}
-	var p vfastjson.Parser
-	_, err := p.Parse(string(data))
-	return err == nil
+	if compatmode.StdJSON {
+		return json.Valid(data)
+	}
+	if err := vfastjson.ValidateBytes(data); err == nil {
+		return true
+	}
+	return validSonicValueBytes(data)
 }
 
 // ValidString is the string-input form of Valid.
@@ -32,9 +43,25 @@ func ValidString(data string) bool {
 	if len(data) == 0 {
 		return false
 	}
-	var p vfastjson.Parser
-	_, err := p.Parse(data)
-	return err == nil
+	if compatmode.StdJSON {
+		return json.Valid([]byte(data))
+	}
+	if err := vfastjson.Validate(data); err == nil {
+		return true
+	}
+	return validSonicValueBytes([]byte(data))
+}
+
+func validSonicValueBytes(data []byte) bool {
+	start := skipJSONSpace(data, 0)
+	if start == len(data) {
+		return false
+	}
+	end, ok := scanValueEnd(data, start, 0)
+	if !ok {
+		return false
+	}
+	return skipJSONSpace(data, end) == len(data)
 }
 
 // Get resolves path against data and returns the matching AST node.
@@ -51,12 +78,27 @@ func Get(data []byte, opts ast.SearchOptions, path ...interface{}) (ast.Node, er
 	if len(data) == 0 {
 		return ast.Node{}, ast.ErrNotExist
 	}
-	src := string(data)
+	if compatmode.StdJSON {
+		return getStdJSON(data, opts, path...)
+	}
 	if opts.ValidateJSON {
-		if err := vfastjson.Validate(src); err != nil {
-			return ast.Node{}, mapFastjsonError(src, err)
+		var p vfastjson.Parser
+		if _, err := p.ParseBytes(data); err != nil {
+			return ast.Node{}, mapFastjsonError(string(data), err)
 		}
 	}
+	if len(path) > 0 {
+		node, status := getPathASCII(data, path)
+		switch status {
+		case scanFound:
+			return node, nil
+		case scanMissing:
+			return ast.Node{}, ast.ErrNotExist
+		case scanInvalid:
+			return ast.Node{}, scanSyntaxError(data)
+		}
+	}
+	src := string(data)
 	// ast.NewSearcher.GetByPath honors SearchOptions.ValidateJSON, but we
 	// have already validated above. We pass the options through so the
 	// searcher sees the caller's intent and so callers that set
@@ -68,6 +110,54 @@ func Get(data []byte, opts ast.SearchOptions, path ...interface{}) (ast.Node, er
 		return ast.Node{}, err
 	}
 	return node, nil
+}
+
+func getStdJSON(data []byte, opts ast.SearchOptions, path ...interface{}) (ast.Node, error) {
+	if !json.Valid(data) {
+		dec := json.NewDecoder(bytes.NewReader(data))
+		var raw json.RawMessage
+		if err := dec.Decode(&raw); err != nil {
+			return ast.Node{}, &ast.SyntaxError{Msg: err.Error(), Code: nativetypes.ERR_INVALID_CHAR}
+		}
+		if err := rejectStdJSONTrailing(dec); err != nil {
+			return ast.Node{}, &ast.SyntaxError{Msg: err.Error(), Code: nativetypes.ERR_INVALID_CHAR}
+		}
+	}
+	if len(path) > 0 {
+		node, status := getPathASCII(data, path)
+		switch status {
+		case scanFound:
+			return node, nil
+		case scanMissing:
+			return ast.Node{}, ast.ErrNotExist
+		case scanInvalid:
+			return ast.Node{}, scanSyntaxError(data)
+		}
+	}
+	s := ast.NewSearcher(string(data))
+	opts.ValidateJSON = false
+	s.SearchOptions = opts
+	return s.GetByPath(path...)
+}
+
+func rejectStdJSONTrailing(dec *json.Decoder) error {
+	var extra struct{}
+	err := dec.Decode(&extra)
+	if err == nil {
+		return fmt.Errorf("invalid trailing data after top-level value")
+	}
+	if err.Error() == "EOF" {
+		return nil
+	}
+	return err
+}
+
+func scanSyntaxError(data []byte) error {
+	return &ast.SyntaxError{
+		Src:  string(data),
+		Msg:  "invalid JSON value",
+		Code: nativetypes.ERR_INVALID_CHAR,
+	}
 }
 
 // mapFastjsonError mirrors ast.mapFastjsonError but is duplicated here to
@@ -110,3 +200,469 @@ func isNotExist(err error) bool {
 
 // Compile-time guard: ensure the helper returns something assignable to error.
 var _ = fmt.Errorf
+
+type scanStatus int
+
+const (
+	scanNoFast scanStatus = iota
+	scanFound
+	scanMissing
+	scanInvalid
+)
+
+func getPathASCII(data []byte, path []interface{}) (ast.Node, scanStatus) {
+	if !canScanASCII(data) {
+		return ast.Node{}, scanNoFast
+	}
+	rootStart := skipJSONSpace(data, 0)
+	if rootStart == len(data) {
+		return ast.Node{}, scanInvalid
+	}
+	start := rootStart
+	for _, step := range path {
+		switch x := step.(type) {
+		case string:
+			var status scanStatus
+			start, status = findObjectValueStart(data, start, x)
+			if status != scanFound {
+				return ast.Node{}, status
+			}
+		case int:
+			var status scanStatus
+			start, status = findArrayValueStart(data, start, x)
+			if status != scanFound {
+				return ast.Node{}, status
+			}
+		case int64:
+			idx, ok := intFromInt64(x)
+			if !ok {
+				return ast.Node{}, scanMissing
+			}
+			var status scanStatus
+			start, status = findArrayValueStart(data, start, idx)
+			if status != scanFound {
+				return ast.Node{}, status
+			}
+		case json.Number:
+			if idx, err := strconv.Atoi(string(x)); err == nil {
+				var status scanStatus
+				start, status = findArrayValueStart(data, start, idx)
+				if status != scanFound {
+					return ast.Node{}, status
+				}
+			} else {
+				var status scanStatus
+				start, status = findObjectValueStart(data, start, string(x))
+				if status != scanFound {
+					return ast.Node{}, status
+				}
+			}
+		default:
+			return ast.Node{}, scanNoFast
+		}
+	}
+	end, ok := scanValueEnd(data, start, 0)
+	if !ok {
+		return ast.Node{}, scanInvalid
+	}
+	return nodeFromScannedRaw(data[start:end]), scanFound
+}
+
+func canScanASCII(data []byte) bool {
+	return true
+}
+
+func nodeFromScannedRaw(raw []byte) ast.Node {
+	if len(raw) == 0 {
+		return ast.Node{}
+	}
+	switch raw[0] {
+	case 'n':
+		return ast.NewNull()
+	case 't':
+		return ast.NewBool(true)
+	case 'f':
+		return ast.NewBool(false)
+	case '{', '[', '"':
+		return ast.NewRaw(string(raw))
+	default:
+		return ast.NewNumber(string(raw))
+	}
+}
+
+func findObjectValueStart(data []byte, start int, key string) (int, scanStatus) {
+	if start >= len(data) || data[start] != '{' {
+		return 0, scanMissing
+	}
+	i := skipJSONSpace(data, start+1)
+	if i < len(data) && data[i] == '}' {
+		return 0, scanMissing
+	}
+	for i < len(data) {
+		if data[i] != '"' {
+			return 0, scanInvalid
+		}
+		keyStart := i + 1
+		keyEnd, ok := scanStringEnd(data, i)
+		if !ok {
+			return 0, scanInvalid
+		}
+		matches, ok := jsonKeyMatches(data[keyStart:keyEnd-1], key)
+		if !ok {
+			return 0, scanNoFast
+		}
+		i = skipJSONSpace(data, keyEnd)
+		if i >= len(data) || data[i] != ':' {
+			return 0, scanInvalid
+		}
+		valueStart := skipJSONSpace(data, i+1)
+		if matches {
+			if valueStart >= len(data) {
+				return 0, scanInvalid
+			}
+			return valueStart, scanFound
+		}
+		valueEnd, ok := scanValueEnd(data, valueStart, 0)
+		if !ok {
+			return 0, scanInvalid
+		}
+		i = skipJSONSpace(data, valueEnd)
+		if i >= len(data) {
+			return 0, scanInvalid
+		}
+		switch data[i] {
+		case ',':
+			i = skipJSONSpace(data, i+1)
+		case '}':
+			return 0, scanMissing
+		default:
+			return 0, scanInvalid
+		}
+	}
+	return 0, scanInvalid
+}
+
+func findArrayValueStart(data []byte, start int, idx int) (int, scanStatus) {
+	if idx < 0 {
+		return 0, scanMissing
+	}
+	if start >= len(data) || data[start] != '[' {
+		return 0, scanMissing
+	}
+	i := skipJSONSpace(data, start+1)
+	if i < len(data) && data[i] == ']' {
+		return 0, scanMissing
+	}
+	cur := 0
+	for i < len(data) {
+		if cur == idx {
+			return i, scanFound
+		}
+		valueEnd, ok := scanValueEnd(data, i, 0)
+		if !ok {
+			return 0, scanInvalid
+		}
+		cur++
+		i = skipJSONSpace(data, valueEnd)
+		if i >= len(data) {
+			return 0, scanInvalid
+		}
+		switch data[i] {
+		case ',':
+			i = skipJSONSpace(data, i+1)
+		case ']':
+			return 0, scanMissing
+		default:
+			return 0, scanInvalid
+		}
+	}
+	return 0, scanInvalid
+}
+
+func findObjectValue(data []byte, start, end int, key string) (int, int, scanStatus) {
+	if start >= end || data[start] != '{' {
+		return 0, 0, scanMissing
+	}
+	i := skipJSONSpace(data, start+1)
+	if i < end && data[i] == '}' {
+		return 0, 0, scanMissing
+	}
+	for i < end {
+		if data[i] != '"' {
+			return 0, 0, scanInvalid
+		}
+		keyStart := i + 1
+		keyEnd, ok := scanStringEnd(data, i)
+		if !ok {
+			return 0, 0, scanInvalid
+		}
+		matches, ok := jsonKeyMatches(data[keyStart:keyEnd-1], key)
+		if !ok {
+			return 0, 0, scanNoFast
+		}
+		i = skipJSONSpace(data, keyEnd)
+		if i >= end || data[i] != ':' {
+			return 0, 0, scanInvalid
+		}
+		valueStart := skipJSONSpace(data, i+1)
+		valueEnd, ok := scanValueEnd(data, valueStart, 0)
+		if !ok || valueEnd > end {
+			return 0, 0, scanInvalid
+		}
+		if matches {
+			return valueStart, valueEnd, scanFound
+		}
+		i = skipJSONSpace(data, valueEnd)
+		if i >= end {
+			return 0, 0, scanInvalid
+		}
+		switch data[i] {
+		case ',':
+			i = skipJSONSpace(data, i+1)
+		case '}':
+			return 0, 0, scanMissing
+		default:
+			return 0, 0, scanInvalid
+		}
+	}
+	return 0, 0, scanInvalid
+}
+
+func findArrayValue(data []byte, start, end int, idx int) (int, int, scanStatus) {
+	if idx < 0 {
+		return 0, 0, scanMissing
+	}
+	if start >= end || data[start] != '[' {
+		return 0, 0, scanMissing
+	}
+	i := skipJSONSpace(data, start+1)
+	if i < end && data[i] == ']' {
+		return 0, 0, scanMissing
+	}
+	cur := 0
+	for i < end {
+		valueStart := i
+		valueEnd, ok := scanValueEnd(data, valueStart, 0)
+		if !ok || valueEnd > end {
+			return 0, 0, scanInvalid
+		}
+		if cur == idx {
+			return valueStart, valueEnd, scanFound
+		}
+		cur++
+		i = skipJSONSpace(data, valueEnd)
+		if i >= end {
+			return 0, 0, scanInvalid
+		}
+		switch data[i] {
+		case ',':
+			i = skipJSONSpace(data, i+1)
+		case ']':
+			return 0, 0, scanMissing
+		default:
+			return 0, 0, scanInvalid
+		}
+	}
+	return 0, 0, scanInvalid
+}
+
+func scanValueEnd(data []byte, start int, depth int) (int, bool) {
+	if depth > vfastjson.MaxDepth || start >= len(data) {
+		return 0, false
+	}
+	switch data[start] {
+	case '{':
+		return scanObjectEnd(data, start, depth+1)
+	case '[':
+		return scanArrayEnd(data, start, depth+1)
+	case '"':
+		return scanStringEnd(data, start)
+	case 't':
+		return scanLiteral(data, start, "true")
+	case 'f':
+		return scanLiteral(data, start, "false")
+	case 'n':
+		return scanLiteral(data, start, "null")
+	default:
+		if data[start] == '-' || (data[start] >= '0' && data[start] <= '9') {
+			return scanNumberEnd(data, start)
+		}
+	}
+	return 0, false
+}
+
+func scanObjectEnd(data []byte, start int, depth int) (int, bool) {
+	i := skipJSONSpace(data, start+1)
+	if i < len(data) && data[i] == '}' {
+		return i + 1, true
+	}
+	for i < len(data) {
+		if data[i] != '"' {
+			return 0, false
+		}
+		keyEnd, ok := scanStringEnd(data, i)
+		if !ok {
+			return 0, false
+		}
+		i = skipJSONSpace(data, keyEnd)
+		if i >= len(data) || data[i] != ':' {
+			return 0, false
+		}
+		i = skipJSONSpace(data, i+1)
+		valueEnd, ok := scanValueEnd(data, i, depth)
+		if !ok {
+			return 0, false
+		}
+		i = skipJSONSpace(data, valueEnd)
+		if i >= len(data) {
+			return 0, false
+		}
+		switch data[i] {
+		case ',':
+			i = skipJSONSpace(data, i+1)
+		case '}':
+			return i + 1, true
+		default:
+			return 0, false
+		}
+	}
+	return 0, false
+}
+
+func scanArrayEnd(data []byte, start int, depth int) (int, bool) {
+	i := skipJSONSpace(data, start+1)
+	if i < len(data) && data[i] == ']' {
+		return i + 1, true
+	}
+	for i < len(data) {
+		valueEnd, ok := scanValueEnd(data, i, depth)
+		if !ok {
+			return 0, false
+		}
+		i = skipJSONSpace(data, valueEnd)
+		if i >= len(data) {
+			return 0, false
+		}
+		switch data[i] {
+		case ',':
+			i = skipJSONSpace(data, i+1)
+		case ']':
+			return i + 1, true
+		default:
+			return 0, false
+		}
+	}
+	return 0, false
+}
+
+func scanStringEnd(data []byte, start int) (int, bool) {
+	escaped := false
+	for i := start + 1; i < len(data); i++ {
+		if escaped {
+			escaped = false
+			continue
+		}
+		if data[i] == '\\' {
+			escaped = true
+			continue
+		}
+		if data[i] == '"' {
+			return i + 1, true
+		}
+	}
+	return 0, false
+}
+
+func scanLiteral(data []byte, start int, lit string) (int, bool) {
+	if len(data)-start < len(lit) || !bytes.Equal(data[start:start+len(lit)], []byte(lit)) {
+		return 0, false
+	}
+	return start + len(lit), true
+}
+
+func scanNumberEnd(data []byte, start int) (int, bool) {
+	i := start
+	if data[i] == '-' {
+		i++
+		if i == len(data) {
+			return 0, false
+		}
+	}
+	if data[i] == '0' {
+		i++
+	} else if data[i] >= '1' && data[i] <= '9' {
+		for i < len(data) && data[i] >= '0' && data[i] <= '9' {
+			i++
+		}
+	} else {
+		return 0, false
+	}
+	if i < len(data) && data[i] == '.' {
+		i++
+		if i == len(data) || data[i] < '0' || data[i] > '9' {
+			return 0, false
+		}
+		for i < len(data) && data[i] >= '0' && data[i] <= '9' {
+			i++
+		}
+	}
+	if i < len(data) && (data[i] == 'e' || data[i] == 'E') {
+		i++
+		if i < len(data) && (data[i] == '+' || data[i] == '-') {
+			i++
+		}
+		if i == len(data) || data[i] < '0' || data[i] > '9' {
+			return 0, false
+		}
+		for i < len(data) && data[i] >= '0' && data[i] <= '9' {
+			i++
+		}
+	}
+	return i, true
+}
+
+func skipJSONSpace(data []byte, i int) int {
+	for i < len(data) {
+		switch data[i] {
+		case ' ', '\n', '\r', '\t':
+			i++
+		default:
+			return i
+		}
+	}
+	return i
+}
+
+func asciiKeyEqual(raw []byte, key string) bool {
+	if len(raw) != len(key) {
+		return false
+	}
+	for i := range raw {
+		if raw[i] != key[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func jsonKeyMatches(raw []byte, key string) (bool, bool) {
+	if bytes.IndexByte(raw, '\\') < 0 {
+		return asciiKeyEqual(raw, key), true
+	}
+	quoted := make([]byte, 0, len(raw)+2)
+	quoted = append(quoted, '"')
+	quoted = append(quoted, raw...)
+	quoted = append(quoted, '"')
+	var decoded string
+	if err := json.Unmarshal(quoted, &decoded); err != nil {
+		return false, false
+	}
+	return decoded == key, true
+}
+
+func intFromInt64(idx int64) (int, bool) {
+	if idx > math.MaxInt || idx < math.MinInt {
+		return 0, false
+	}
+	return int(idx), true
+}

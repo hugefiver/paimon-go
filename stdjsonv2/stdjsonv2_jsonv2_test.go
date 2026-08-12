@@ -164,6 +164,25 @@ func TestJSONv2GetFromString(t *testing.T) {
 	}
 }
 
+func TestJSONv2GetEscapedObjectKey(t *testing.T) {
+	for _, tt := range []struct {
+		json string
+		key  string
+	}{
+		{json: `{"\u0061":1}`, key: "a"},
+		{json: `{"a\/b":1}`, key: "a/b"},
+		{json: `{"a\"b":1}`, key: `a"b`},
+	} {
+		n, err := Get([]byte(tt.json), tt.key)
+		if err != nil {
+			t.Fatalf("Get(%s, %q) error = %v", tt.json, tt.key, err)
+		}
+		if got, err := n.Int64(); err != nil || got != 1 {
+			t.Fatalf("Get(%s, %q) = %d, %v; want 1, nil", tt.json, tt.key, got, err)
+		}
+	}
+}
+
 func TestJSONv2GetCopyFromString(t *testing.T) {
 	n, err := GetCopyFromString(`{"a":[{"b":3}]}`, "a", 0, "b")
 	if err != nil {
@@ -268,5 +287,19 @@ func TestJSONv2GetWithOptions(t *testing.T) {
 	got, err := n.Int64()
 	if err != nil || got != 3 {
 		t.Fatalf("GetWithOptions value = %d, err = %v", got, err)
+	}
+}
+
+func TestJSONv2GetRejectsMalformedInputEvenInDefaultSonicMode(t *testing.T) {
+	for _, data := range [][]byte{
+		[]byte(`{"a":1}xxx`),
+		[]byte(`{"a":01}`),
+		[]byte(`{"a":1.}`),
+		[]byte(`{"a":1e}`),
+		[]byte(`{"a":+1}`),
+	} {
+		if _, err := Get(data, "a"); err == nil {
+			t.Fatalf("Get(%q, a) error = nil, want strict jsonv2 error", data)
+		}
 	}
 }

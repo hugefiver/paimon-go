@@ -15,6 +15,7 @@ import (
 	"io"
 
 	"github.com/bytedance/sonic/ast"
+	"github.com/bytedance/sonic/internal/fastjsoncompat"
 	"github.com/bytedance/sonic/internal/jsonconv"
 )
 
@@ -41,16 +42,11 @@ func doGet(data []byte, opts ast.SearchOptions, path ...interface{}) (ast.Node, 
 // use of ast.NewRaw (not ast.NewBytes) matches the task contract: the
 // searcher parses raw JSON text on demand.
 func GetWithOptions(src []byte, opts ast.SearchOptions, path ...interface{}) (ast.Node, error) {
-	if len(src) == 0 {
-		return ast.Node{}, ast.ErrNotExist
+	if len(src) == 0 || !stdjsontext.Value(src).IsValid() {
+		return ast.Node{}, &ast.SyntaxError{Src: string(src), Msg: "invalid JSON value"}
 	}
-	// Validate the document first if requested. We use the ast package's
-	// own searcher which honors ValidateJSON; but we run a separate
-	// explicit check so an invalid document surfaces a syntax error before
-	// path resolution.
-	s := ast.NewSearcher(string(src))
-	s.SearchOptions = opts
-	return s.GetByPath(path...)
+	opts.ValidateJSON = false
+	return fastjsoncompat.Get(src, opts, path...)
 }
 
 // jsonv2API is the jsonv2-backed implementation of API.

@@ -21,9 +21,19 @@ $oldExperiment = $env:GOEXPERIMENT
 
 Push-Location $scriptDir
 try {
-    Invoke-Bench -Label "=== local root fastjson/default ===" -Arguments @(
+    Invoke-Bench -Label "=== local root sonic/default ===" -Arguments @(
         "test",
         "-modfile=go.local.mod",
+        "./rootbench",
+        "-bench=.",
+        "-benchmem",
+        "-run=^$"
+    )
+
+    Invoke-Bench -Label "=== local root stdjson tag ===" -Arguments @(
+        "test",
+        "-modfile=go.local.mod",
+        "-tags=sonic_stdjson",
         "./rootbench",
         "-bench=.",
         "-benchmem",

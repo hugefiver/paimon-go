@@ -278,6 +278,25 @@ func TestSearcherAndParser(t *testing.T) {
 	}
 }
 
+func TestSearcherEscapedObjectKey(t *testing.T) {
+	for _, tt := range []struct {
+		json string
+		key  string
+	}{
+		{json: `{"\u0061":1}`, key: "a"},
+		{json: `{"a\/b":1}`, key: "a/b"},
+		{json: `{"a\"b":1}`, key: `a"b`},
+	} {
+		n, err := NewSearcher(tt.json).GetByPath(tt.key)
+		if err != nil {
+			t.Fatalf("GetByPath(%s, %q) error = %v", tt.json, tt.key, err)
+		}
+		if got, err := n.Int64(); err != nil || got != 1 {
+			t.Fatalf("GetByPath(%s, %q) = %d, %v; want 1, nil", tt.json, tt.key, got, err)
+		}
+	}
+}
+
 func TestNewBytesBase64(t *testing.T) {
 	src := []byte("hello")
 	n := NewBytes(src)

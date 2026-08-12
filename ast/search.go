@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strconv"
+	"strings"
 
 	nativetypes "github.com/bytedance/sonic/internal/native/types"
 	vfastjson "github.com/valyala/fastjson"
@@ -45,6 +46,16 @@ func (s *Searcher) getByPath(path []interface{}, copyReturn bool) (Node, error) 
 			return Node{}, code
 		}
 		return NewRaw(raw), nil
+	}
+	if node, status := getPathRaw(s.src, path); status != rawPathNoFast {
+		switch status {
+		case rawPathFound:
+			return node, nil
+		case rawPathMissing:
+			return Node{}, ErrNotExist
+		case rawPathInvalid:
+			return Node{}, SyntaxError{Src: s.src, Msg: "invalid JSON value", Code: nativetypes.ERR_INVALID_CHAR}
+		}
 	}
 	var fp vfastjson.Parser
 	v, err := fp.Parse(s.src)
@@ -129,11 +140,367 @@ func firstValueRaw(src string) (string, nativetypes.ParsingError) {
 		return "", nativetypes.ERR_MISMATCH
 	}
 	raw := src[start:end]
-	var fp vfastjson.Parser
-	if _, err := fp.Parse(raw); err != nil {
+	if !validRootRaw(raw) {
+		var fp vfastjson.Parser
+		_, err := fp.Parse(raw)
+		if err == nil {
+			return "", nativetypes.ERR_INVALID_NUMBER_FMT
+		}
 		return "", mapFastjsonError(raw, err)
 	}
 	return raw, 0
+}
+
+type rawPathStatus int
+
+const (
+	rawPathNoFast rawPathStatus = iota
+	rawPathFound
+	rawPathMissing
+	rawPathInvalid
+)
+
+func getPathRaw(src string, path []interface{}) (Node, rawPathStatus) {
+	if !canScanASCII(src) {
+		return Node{}, rawPathNoFast
+	}
+	start := skipJSONSpaceString(src, 0)
+	if start == len(src) {
+		return Node{}, rawPathInvalid
+	}
+	for _, step := range path {
+		switch x := step.(type) {
+		case string:
+			var status rawPathStatus
+			start, status = findObjectValueStartString(src, start, x)
+			if status != rawPathFound {
+				return Node{}, status
+			}
+		case int:
+			var status rawPathStatus
+			start, status = findArrayValueStartString(src, start, x)
+			if status != rawPathFound {
+				return Node{}, status
+			}
+		case int64:
+			idx := int(x)
+			if int64(idx) != x {
+				return Node{}, rawPathMissing
+			}
+			var status rawPathStatus
+			start, status = findArrayValueStartString(src, start, idx)
+			if status != rawPathFound {
+				return Node{}, status
+			}
+		case json.Number:
+			if idx, err := strconv.Atoi(string(x)); err == nil {
+				var status rawPathStatus
+				start, status = findArrayValueStartString(src, start, idx)
+				if status != rawPathFound {
+					return Node{}, status
+				}
+			} else {
+				var status rawPathStatus
+				start, status = findObjectValueStartString(src, start, string(x))
+				if status != rawPathFound {
+					return Node{}, status
+				}
+			}
+		default:
+			return Node{}, rawPathNoFast
+		}
+	}
+	end, ok := scanValueEndString(src, start, 0)
+	if !ok {
+		return Node{}, rawPathInvalid
+	}
+	node := nodeFromRaw(src[start:end])
+	if err := node.Check(); err != nil {
+		return Node{}, rawPathInvalid
+	}
+	return node, rawPathFound
+}
+
+func nodeFromRaw(raw string) Node {
+	if raw == "" {
+		return Node{}
+	}
+	switch raw[0] {
+	case 'n':
+		return NewNull()
+	case 't':
+		return NewBool(true)
+	case 'f':
+		return NewBool(false)
+	case '{', '[', '"':
+		return NewRaw(raw)
+	default:
+		return NewNumber(raw)
+	}
+}
+
+func canScanASCII(src string) bool {
+	return true
+}
+
+func findObjectValueStartString(src string, start int, key string) (int, rawPathStatus) {
+	if start >= len(src) || src[start] != '{' {
+		return 0, rawPathMissing
+	}
+	i := skipJSONSpaceString(src, start+1)
+	if i < len(src) && src[i] == '}' {
+		return 0, rawPathMissing
+	}
+	for i < len(src) {
+		if src[i] != '"' {
+			return 0, rawPathInvalid
+		}
+		keyStart := i + 1
+		keyEnd, ok := scanStringEnd(src, i)
+		if !ok {
+			return 0, rawPathInvalid
+		}
+		matches, ok := jsonKeyMatchesString(src[keyStart:keyEnd-1], key)
+		if !ok {
+			return 0, rawPathNoFast
+		}
+		i = skipJSONSpaceString(src, keyEnd)
+		if i >= len(src) || src[i] != ':' {
+			return 0, rawPathInvalid
+		}
+		valueStart := skipJSONSpaceString(src, i+1)
+		if matches {
+			if valueStart >= len(src) {
+				return 0, rawPathInvalid
+			}
+			return valueStart, rawPathFound
+		}
+		valueEnd, ok := scanValueEndString(src, valueStart, 0)
+		if !ok {
+			return 0, rawPathInvalid
+		}
+		i = skipJSONSpaceString(src, valueEnd)
+		if i >= len(src) {
+			return 0, rawPathInvalid
+		}
+		switch src[i] {
+		case ',':
+			i = skipJSONSpaceString(src, i+1)
+		case '}':
+			return 0, rawPathMissing
+		default:
+			return 0, rawPathInvalid
+		}
+	}
+	return 0, rawPathInvalid
+}
+
+func findArrayValueStartString(src string, start int, idx int) (int, rawPathStatus) {
+	if idx < 0 {
+		return 0, rawPathMissing
+	}
+	if start >= len(src) || src[start] != '[' {
+		return 0, rawPathMissing
+	}
+	i := skipJSONSpaceString(src, start+1)
+	if i < len(src) && src[i] == ']' {
+		return 0, rawPathMissing
+	}
+	cur := 0
+	for i < len(src) {
+		if cur == idx {
+			return i, rawPathFound
+		}
+		valueEnd, ok := scanValueEndString(src, i, 0)
+		if !ok {
+			return 0, rawPathInvalid
+		}
+		cur++
+		i = skipJSONSpaceString(src, valueEnd)
+		if i >= len(src) {
+			return 0, rawPathInvalid
+		}
+		switch src[i] {
+		case ',':
+			i = skipJSONSpaceString(src, i+1)
+		case ']':
+			return 0, rawPathMissing
+		default:
+			return 0, rawPathInvalid
+		}
+	}
+	return 0, rawPathInvalid
+}
+
+func scanValueEndString(src string, start int, depth int) (int, bool) {
+	if depth > vfastjson.MaxDepth || start >= len(src) {
+		return 0, false
+	}
+	switch src[start] {
+	case '{':
+		return scanObjectEndString(src, start, depth+1)
+	case '[':
+		return scanArrayEndString(src, start, depth+1)
+	case '"':
+		return scanStringEnd(src, start)
+	case 't':
+		return scanLiteralString(src, start, "true")
+	case 'f':
+		return scanLiteralString(src, start, "false")
+	case 'n':
+		return scanLiteralString(src, start, "null")
+	default:
+		if src[start] == '-' || (src[start] >= '0' && src[start] <= '9') {
+			return scanNumberEndString(src, start)
+		}
+	}
+	return 0, false
+}
+
+func scanObjectEndString(src string, start int, depth int) (int, bool) {
+	i := skipJSONSpaceString(src, start+1)
+	if i < len(src) && src[i] == '}' {
+		return i + 1, true
+	}
+	for i < len(src) {
+		if src[i] != '"' {
+			return 0, false
+		}
+		keyEnd, ok := scanStringEnd(src, i)
+		if !ok {
+			return 0, false
+		}
+		i = skipJSONSpaceString(src, keyEnd)
+		if i >= len(src) || src[i] != ':' {
+			return 0, false
+		}
+		i = skipJSONSpaceString(src, i+1)
+		valueEnd, ok := scanValueEndString(src, i, depth)
+		if !ok {
+			return 0, false
+		}
+		i = skipJSONSpaceString(src, valueEnd)
+		if i >= len(src) {
+			return 0, false
+		}
+		switch src[i] {
+		case ',':
+			i = skipJSONSpaceString(src, i+1)
+		case '}':
+			return i + 1, true
+		default:
+			return 0, false
+		}
+	}
+	return 0, false
+}
+
+func scanArrayEndString(src string, start int, depth int) (int, bool) {
+	i := skipJSONSpaceString(src, start+1)
+	if i < len(src) && src[i] == ']' {
+		return i + 1, true
+	}
+	for i < len(src) {
+		valueEnd, ok := scanValueEndString(src, i, depth)
+		if !ok {
+			return 0, false
+		}
+		i = skipJSONSpaceString(src, valueEnd)
+		if i >= len(src) {
+			return 0, false
+		}
+		switch src[i] {
+		case ',':
+			i = skipJSONSpaceString(src, i+1)
+		case ']':
+			return i + 1, true
+		default:
+			return 0, false
+		}
+	}
+	return 0, false
+}
+
+func scanLiteralString(src string, start int, lit string) (int, bool) {
+	if len(src)-start < len(lit) || src[start:start+len(lit)] != lit {
+		return 0, false
+	}
+	return start + len(lit), true
+}
+
+func scanNumberEndString(src string, start int) (int, bool) {
+	i := start
+	if src[i] == '-' {
+		i++
+		if i == len(src) {
+			return 0, false
+		}
+	}
+	if src[i] == '0' {
+		i++
+	} else if src[i] >= '1' && src[i] <= '9' {
+		for i < len(src) && src[i] >= '0' && src[i] <= '9' {
+			i++
+		}
+	} else {
+		return 0, false
+	}
+	if i < len(src) && src[i] == '.' {
+		i++
+		if i == len(src) || src[i] < '0' || src[i] > '9' {
+			return 0, false
+		}
+		for i < len(src) && src[i] >= '0' && src[i] <= '9' {
+			i++
+		}
+	}
+	if i < len(src) && (src[i] == 'e' || src[i] == 'E') {
+		i++
+		if i < len(src) && (src[i] == '+' || src[i] == '-') {
+			i++
+		}
+		if i == len(src) || src[i] < '0' || src[i] > '9' {
+			return 0, false
+		}
+		for i < len(src) && src[i] >= '0' && src[i] <= '9' {
+			i++
+		}
+	}
+	return i, true
+}
+
+func skipJSONSpaceString(src string, i int) int {
+	for i < len(src) && isJSONSpace(src[i]) {
+		i++
+	}
+	return i
+}
+
+func asciiKeyEqualString(raw string, key string) bool {
+	return raw == key
+}
+
+func jsonKeyMatchesString(raw string, key string) (bool, bool) {
+	if strings.IndexByte(raw, '\\') < 0 {
+		return asciiKeyEqualString(raw, key), true
+	}
+	var decoded string
+	if err := json.Unmarshal([]byte("\""+raw+"\""), &decoded); err != nil {
+		return false, false
+	}
+	return decoded == key, true
+}
+
+func validRootRaw(raw string) bool {
+	start := skipJSONSpaceString(raw, 0)
+	if start == len(raw) {
+		return false
+	}
+	end, ok := scanValueEndString(raw, start, 0)
+	if !ok {
+		return false
+	}
+	return skipJSONSpaceString(raw, end) == len(raw)
 }
 
 func scanFirstValueEnd(src string, start int) (int, bool) {
@@ -142,12 +509,17 @@ func scanFirstValueEnd(src string, start int) (int, bool) {
 		return scanContainerEnd(src, start)
 	case '"':
 		return scanStringEnd(src, start)
+	case 't':
+		return scanLiteralString(src, start, "true")
+	case 'f':
+		return scanLiteralString(src, start, "false")
+	case 'n':
+		return scanLiteralString(src, start, "null")
 	default:
-		end := start
-		for end < len(src) && !isJSONSpace(src[end]) && src[end] != ',' && src[end] != ']' && src[end] != '}' {
-			end++
+		if src[start] == '-' || (src[start] >= '0' && src[start] <= '9') {
+			return scanNumberEndString(src, start)
 		}
-		return end, end > start
+		return 0, false
 	}
 }
 

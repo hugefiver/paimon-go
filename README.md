@@ -13,15 +13,21 @@ replace github.com/bytedance/sonic => <path-to-this-checkout>
 
 The goal is API/source compatibility for users that need a portable
 implementation. It does **not** promise performance close to upstream Sonic's
-native/JIT implementation.
+native/JIT implementation. The compatibility rule is: support for standard JSON
+must not be worse than upstream Sonic. For behavior where upstream Sonic accepts
+non-standard JSON, the default implementation chooses the faster or better local
+strategy. The current raw `Valid`/`Get` paths default to Sonic-compatible
+behavior because that path benchmarks substantially faster while still accepting
+standard JSON. Use the `sonic_stdjson` build tag to force strict standard JSON
+behavior for those raw entry points.
 
 ## Backends and import paths
 
-- **Root package (`github.com/bytedance/sonic`)**: the default backend uses
-  fastjson-oriented behavior for raw JSON operations such as `Valid`, `Get`,
-  AST parsing, path lookup, and raw JSON handling. Arbitrary Go value
-  reflection (`Marshal`, `Unmarshal`, encoders, and decoders) falls back to the
-  standard `encoding/json` v1 APIs.
+- **Root package (`github.com/bytedance/sonic`)**: the default backend accepts
+  standard JSON and uses Sonic-compatible raw JSON behavior for hot paths where
+  it benchmarks faster than strict standard validation, especially `Valid` and
+  `Get`. Arbitrary Go value reflection (`Marshal`, `Unmarshal`, encoders, and
+  decoders) falls back to the standard `encoding/json` v1 APIs.
 - **`github.com/bytedance/sonic/fastjson`**: an explicit thin wrapper around
   the root package. Its exported types are aliases of the root types and its
   functions forward to the root implementation.
@@ -150,9 +156,25 @@ Pop-Location
 ```
 
 The benchmark runner prints reproducible side-by-side measurements for the
-local root/default backend, the local `stdjsonv2` backend, and upstream Sonic
+local root/default backend, the local root `sonic_stdjson` build, the local `stdjsonv2` backend, and upstream Sonic
 v1.15.2. These numbers are for comparison only; this project does not claim to
 match upstream Sonic performance.
+
+## Strict standard JSON mode
+
+The default build keeps observed Sonic-compatible raw parser behavior for the
+hot raw JSON entry points where that path is faster in this implementation. If
+you prefer strict standard JSON behavior when Sonic and `encoding/json` disagree,
+build with the `sonic_stdjson` tag:
+
+```powershell
+go test -tags sonic_stdjson ./... -count=1
+```
+
+With this tag, root `Valid`, `Unmarshal`, and `Get` reject non-standard inputs
+such as raw control bytes inside strings or trailing garbage after the top-level
+value. This trades some upstream Sonic parity and raw-path speed for strict JSON
+semantics.
 
 See [`docs/compatibility.md`](docs/compatibility.md) for detailed behavior and
 known differences.

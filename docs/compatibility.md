@@ -37,11 +37,20 @@ implemented.
 
 ### Root / default backend
 
-The root package uses a **fastjson-oriented** backend for raw JSON behavior:
+The root package chooses raw JSON behavior per feature according to the project
+policy: support for standard JSON must not be worse than upstream Sonic; when
+upstream Sonic accepts non-standard JSON, default to the faster or better local
+strategy and provide a build tag for forcing strict standard behavior when
+needed.
 
 - `Valid`, `ValidString`, `Get`, `GetFromString`, `GetCopyFromString`,
-  `GetWithOptions`, AST parsing, path lookup, and raw JSON nodes use
-  `github.com/valyala/fastjson`-oriented semantics.
+  and `GetWithOptions` default to the observed Sonic/fastjson-style raw parser
+  behavior because that implementation is faster than the strict standard path
+  for the current hot-path benchmarks while still accepting standard JSON.
+- Build with `-tags sonic_stdjson` to force strict standard JSON behavior for
+  these raw JSON entry points.
+- AST parsing and raw JSON nodes remain Sonic-shaped APIs and may still use
+  `github.com/valyala/fastjson`-oriented helpers internally.
 - `Marshal`, `MarshalString`, `MarshalIndent`, `Unmarshal`,
   `UnmarshalString`, `NewEncoder`, and `NewDecoder` for arbitrary Go values
   use the standard `encoding/json` v1 reflection fallback.
@@ -74,13 +83,15 @@ behavior as the root/default backend.
 
 ### Raw JSON validation and lookup
 
-- Root `Valid` follows the Sonic/fastjson-style behavior observed in parity
-  testing. In particular, raw control bytes inside strings are accepted more
-  loosely than strict `encoding/json` validation.
-- Root `Get` with an empty path returns the first complete JSON value and
-  ignores trailing garbage, matching the upstream behavior found by the
-  differential tests. Non-empty path queries still require the JSON text to be
-  parseable enough for path resolution.
+- Root `Valid` accepts raw control bytes inside strings by default, root
+  `Unmarshal` normalizes those raw control bytes before the `encoding/json`
+  fallback, and empty-path root `Get` returns the first complete JSON value while
+  ignoring trailing garbage. This matches observed upstream Sonic behavior for
+  these hot paths.
+- Build with `-tags sonic_stdjson` to force strict `encoding/json`-style
+  behavior. Under that tag, root `Valid`, `Unmarshal`, and `Get` reject inputs
+  that `encoding/json` rejects, including raw control bytes inside strings and
+  trailing garbage after the top-level value.
 
 ### AST parsing errors
 

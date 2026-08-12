@@ -1,10 +1,11 @@
 # Sonic benchmark subproject
 
-This directory contains a standalone benchmark module for comparing three JSON modes against the same benchmark shapes:
+This directory contains a standalone benchmark module for comparing four JSON modes against the same benchmark shapes:
 
-1. local root `github.com/bytedance/sonic` using the repository's default fastjson/stdjson-compatible implementation;
-2. local `github.com/bytedance/sonic/stdjsonv2` with `GOEXPERIMENT=jsonv2`;
-3. upstream `github.com/bytedance/sonic` v1.15.2.
+1. local root `github.com/bytedance/sonic` using the repository's default Sonic-compatible raw JSON implementation;
+2. local root `github.com/bytedance/sonic` with `-tags sonic_stdjson` enabled for strict standard raw JSON behavior;
+3. local `github.com/bytedance/sonic/stdjsonv2` with `GOEXPERIMENT=jsonv2`;
+4. upstream `github.com/bytedance/sonic` v1.15.2.
 
 The root repository already uses the module path `github.com/bytedance/sonic`, so the benchmark module cannot import the local root package and upstream Sonic through one module file at the same time. The switch is handled with two module files:
 
@@ -15,24 +16,31 @@ The benchmarks are intended to provide reproducible side-by-side numbers only. T
 
 ## Runner
 
-Run all three modes from this directory:
+Run all four modes from this directory:
 
 ```powershell
 pwsh -File .\run.ps1
 ```
 
-The runner prints three labeled blocks:
+The runner prints four labeled blocks:
 
-- `=== local root fastjson/default ===`
+- `=== local root sonic/default ===`
+- `=== local root stdjson tag ===`
 - `=== local stdjsonv2 ===`
 - `=== upstream sonic v1.15.2 ===`
 
 ## Manual commands
 
-Local root default mode:
+Local root default Sonic-compatible mode:
 
 ```powershell
 go test "-modfile=go.local.mod" ./rootbench -bench=. -benchmem -run='^$'
+```
+
+Local root strict standard-JSON mode:
+
+```powershell
+go test "-modfile=go.local.mod" -tags sonic_stdjson ./rootbench -bench=. -benchmem -run='^$'
 ```
 
 Local `stdjsonv2` mode:

@@ -1,6 +1,6 @@
 # Sonic differential fuzz harness
 
-This directory contains a smoke differential harness for comparing this repository's `github.com/bytedance/sonic` replacement with the real upstream Sonic v1.15.2 module.
+This directory contains a smoke differential harness for comparing this repository's `github.com/bytedance/sonic` replacement with the real upstream Sonic v1.15.2 module. It is intended for the default mode, where non-standard Sonic parser behavior is enabled for hot raw JSON paths because it is faster than strict standard validation in this implementation.
 
 The repository itself uses the same module path as upstream Sonic, so a single Go module cannot import both implementations at once. To avoid that same-module-path collision, the harness is split into three modules:
 

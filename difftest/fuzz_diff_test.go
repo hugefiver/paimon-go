@@ -38,6 +38,7 @@ func pathFromSeed(seed string) []pathPart {
 	candidates := []pathPart{
 		{Kind: "key", Key: "x"},
 		{Kind: "key", Key: "users"},
+		{Kind: "key", Key: "a"},
 		{Kind: "index", Index: 0},
 		{Kind: "index", Index: 1},
 		{Kind: "key", Key: "seed"},
@@ -63,10 +64,12 @@ func runHelper(t *testing.T, dir string, req request) result {
 	}
 
 	cmdPath := "./cmd/sonicupstream"
+	args := []string{"run", cmdPath}
 	if filepath.Base(dir) == "local" {
 		cmdPath = "./cmd/soniclocal"
+		args = []string{"run", cmdPath}
 	}
-	cmd := exec.Command("go", "run", cmdPath)
+	cmd := exec.Command("go", args...)
 	cmd.Dir = dir
 	cmd.Stdin = bytes.NewReader(reqBytes)
 	var stderr bytes.Buffer
@@ -91,6 +94,11 @@ func FuzzUpstreamSonicParity(f *testing.F) {
 		`{"users":[{"id":1},{"id":2}]}`,
 		`[1,true,"x"]`,
 		`{"bad":`,
+		`{"a":01}`,
+		`{"a":1.}`,
+		`{"a":1e}`,
+		`{"a":+1}`,
+		`7xxx`,
 	} {
 		f.Add(seed)
 	}
@@ -107,4 +115,88 @@ func FuzzUpstreamSonicParity(f *testing.F) {
 			t.Fatalf("sonic parity mismatch\ndata: %q\npath: %+v\nlocal: %+v\nupstream: %+v", data, req.Path, local, upstream)
 		}
 	})
+}
+
+func TestMalformedNumberParity(t *testing.T) {
+	for _, data := range []string{
+		`{"a":01}`,
+		`{"a":1.}`,
+		`{"a":1e}`,
+		`{"a":+1}`,
+		string([]byte{'{', '"', 'a', '"', ':', '"', 0x11, 'a', '"', ',', '"', 'b', '"', ':', '0', '1', '}'}),
+		string([]byte{'{', '"', 'a', '"', ':', '"', 0x11, 'a', '"', ',', '"', 'b', '"', ':', '1', 'e', '}'}),
+	} {
+		req := request{
+			Data: base64.StdEncoding.EncodeToString([]byte(data)),
+			Path: []pathPart{{Kind: "key", Key: "a"}},
+		}
+		local := runHelper(t, filepath.Join("local"), req)
+		upstream := runHelper(t, filepath.Join("upstream"), req)
+		if !reflect.DeepEqual(local, upstream) {
+			t.Fatalf("sonic parity mismatch\ndata: %q\npath: %+v\nlocal: %+v\nupstream: %+v", data, req.Path, local, upstream)
+		}
+	}
+}
+
+func TestMalformedNumberContainerPathParity(t *testing.T) {
+	for _, data := range []string{
+		`{"a":{"b":1e}}`,
+		`{"a":{"b":01}}`,
+		`{"x":"\n","a":{"b":1e}}`,
+		`{"x":"\n","a":{"b":01}}`,
+		`{"\u0061":{"b":1e}}`,
+		`{"\u0061":{"b":01}}`,
+		`{"é":1,"a":{"b":1e}}`,
+		`{"é":1,"a":{"b":01}}`,
+	} {
+		req := request{
+			Data: base64.StdEncoding.EncodeToString([]byte(data)),
+			Path: []pathPart{{Kind: "key", Key: "a"}},
+		}
+		local := runHelper(t, filepath.Join("local"), req)
+		upstream := runHelper(t, filepath.Join("upstream"), req)
+		if !reflect.DeepEqual(local, upstream) {
+			t.Fatalf("sonic parity mismatch\ndata: %q\npath: %+v\nlocal: %+v\nupstream: %+v", data, req.Path, local, upstream)
+		}
+	}
+}
+
+func TestEscapedObjectKeyParity(t *testing.T) {
+	for _, tt := range []struct {
+		data string
+		key  string
+	}{
+		{data: `{"\u0061":1}`, key: "a"},
+		{data: `{"a\/b":1}`, key: "a/b"},
+		{data: `{"a\"b":1}`, key: `a"b`},
+	} {
+		req := request{
+			Data: base64.StdEncoding.EncodeToString([]byte(tt.data)),
+			Path: []pathPart{{Kind: "key", Key: tt.key}},
+		}
+		local := runHelper(t, filepath.Join("local"), req)
+		upstream := runHelper(t, filepath.Join("upstream"), req)
+		if !reflect.DeepEqual(local, upstream) {
+			t.Fatalf("sonic parity mismatch\ndata: %q\npath: %+v\nlocal: %+v\nupstream: %+v", tt.data, req.Path, local, upstream)
+		}
+	}
+}
+
+func TestInvalidEscapeRawParity(t *testing.T) {
+	for _, tt := range []struct {
+		data string
+		path []pathPart
+	}{
+		{data: `{"a":"\q","b":1}`, path: []pathPart{{Kind: "key", Key: "a"}}},
+		{data: `{"a":"\uZZZZ","b":1}`, path: []pathPart{{Kind: "key", Key: "a"}}},
+		{data: `{"a":{"b":"\q"}}`, path: []pathPart{{Kind: "key", Key: "a"}}},
+		{data: `{"a":{"b":"\uZZZZ"}}`, path: []pathPart{{Kind: "key", Key: "a"}}},
+	} {
+		req := request{Data: base64.StdEncoding.EncodeToString([]byte(tt.data)), Path: tt.path}
+		local := runHelper(t, filepath.Join("local"), req)
+		upstream := runHelper(t, filepath.Join("upstream"), req)
+		if !reflect.DeepEqual(local, upstream) {
+			t.Fatalf("sonic parity mismatch\ndata: %q\npath: %+v\nlocal: %+v\nupstream: %+v", tt.data, req.Path, local, upstream)
+		}
+	}
 }

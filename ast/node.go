@@ -66,8 +66,8 @@ func NewRaw(j string) Node {
 		return Node{typ: V_ERROR, exists: true, loaded: true, err: SyntaxError{Pos: len(j), Src: j, Code: nativetypes.ERR_MISMATCH}}
 	}
 	raw := j[start:end]
-	if _, perr := parseRawToNode(raw); perr != 0 {
-		return Node{typ: V_ERROR, exists: true, loaded: true, err: SyntaxError{Pos: locateErrorOffset(raw, perr), Src: raw, Code: perr}}
+	if !validRootRaw(raw) {
+		return Node{typ: V_ERROR, exists: true, loaded: true, err: SyntaxError{Pos: len(raw), Src: raw, Code: nativetypes.ERR_INVALID_CHAR}}
 	}
 	return Node{typ: V_ANY, exists: true, raw: raw}
 }

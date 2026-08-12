@@ -62,37 +62,28 @@ func TestRootGetAndNoCopyRawMessage(t *testing.T) {
 	}
 }
 
-func TestRootAcceptsRawControlByteInStringLikeSonic(t *testing.T) {
-	data := []byte{'{', '"', 0x11, 'x', '"', ':', '1', '}'}
-	if !Valid(data) {
-		t.Fatalf("Valid(%q) = false, want true for Sonic-compatible raw control string", data)
-	}
-	var out map[string]interface{}
-	if err := Unmarshal(data, &out); err != nil {
-		t.Fatalf("Unmarshal(%q) error = %v, want nil", data, err)
-	}
-	if _, ok := out[string([]byte{0x11, 'x'})]; !ok {
-		t.Fatalf("decoded keys = %#v, want raw-control key", out)
+func TestRootGetEscapedObjectKey(t *testing.T) {
+	for _, tt := range []struct {
+		json string
+		key  string
+	}{
+		{json: `{"\u0061":1}`, key: "a"},
+		{json: `{"a\/b":1}`, key: "a/b"},
+		{json: `{"a\"b":1}`, key: `a"b`},
+	} {
+		n, err := Get([]byte(tt.json), tt.key)
+		if err != nil {
+			t.Fatalf("Get(%s, %q) error = %v", tt.json, tt.key, err)
+		}
+		if got, err := n.Int64(); err != nil || got != 1 {
+			t.Fatalf("Get(%s, %q) = %d, %v; want 1, nil", tt.json, tt.key, got, err)
+		}
 	}
 }
 
 func TestRootGetRejectsMalformedJSONAtRoot(t *testing.T) {
 	if _, err := Get([]byte(`{"bad":`)); err == nil {
 		t.Fatalf(`Get({"bad":) error = nil, want malformed JSON error`)
-	}
-}
-
-func TestRootGetReturnsFirstValueBeforeTrailingGarbageLikeSonic(t *testing.T) {
-	n, err := Get([]byte(`[1,true]x"",`))
-	if err != nil {
-		t.Fatalf("Get with trailing garbage error = %v, want nil", err)
-	}
-	raw, err := n.Raw()
-	if err != nil {
-		t.Fatalf("Raw() error = %v", err)
-	}
-	if raw != `[1,true]` {
-		t.Fatalf("Raw() = %q, want first JSON value", raw)
 	}
 }
 

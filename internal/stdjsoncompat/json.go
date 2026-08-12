@@ -87,7 +87,7 @@ func MarshalIndent(v interface{}, prefix, indent string, cfg backend.Config) ([]
 
 // Unmarshal parses data into v under cfg.
 func Unmarshal(data []byte, v interface{}, cfg backend.Config) error {
-	data = escapeRawControlsInStrings(data)
+	data = normalizeUnmarshalInput(data)
 	if cfg.UseNumber || cfg.UseInt64 {
 		dec := json.NewDecoder(bytes.NewReader(data))
 		dec.UseNumber()
