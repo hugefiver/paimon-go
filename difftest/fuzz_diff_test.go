@@ -22,16 +22,21 @@ type request struct {
 }
 
 type result struct {
-	Valid           bool   `json:"valid"`
-	UnmarshalOK     bool   `json:"unmarshal_ok"`
-	MarshalOK       bool   `json:"marshal_ok"`
-	Normalized      string `json:"normalized,omitempty"`
-	GetRootOK       bool   `json:"get_root_ok"`
-	GetRootRaw      string `json:"get_root_raw,omitempty"`
-	GetPathOK       bool   `json:"get_path_ok"`
-	GetPathRaw      string `json:"get_path_raw,omitempty"`
-	SearcherPathOK  bool   `json:"searcher_path_ok"`
-	SearcherPathRaw string `json:"searcher_path_raw,omitempty"`
+	Valid              bool   `json:"valid"`
+	UnmarshalOK        bool   `json:"unmarshal_ok"`
+	MarshalOK          bool   `json:"marshal_ok"`
+	Normalized         string `json:"normalized,omitempty"`
+	GetRootOK          bool   `json:"get_root_ok"`
+	GetRootRaw         string `json:"get_root_raw,omitempty"`
+	GetPathOK          bool   `json:"get_path_ok"`
+	GetPathRaw         string `json:"get_path_raw,omitempty"`
+	SearcherPathOK     bool   `json:"searcher_path_ok"`
+	SearcherPathRaw    string `json:"searcher_path_raw,omitempty"`
+	PreorderOnlyNumber string `json:"preorder_only_number,omitempty"`
+	NewRawType         int    `json:"new_raw_type,omitempty"`
+	SkipStart          int    `json:"skip_start"`
+	SkipEnd            int    `json:"skip_end"`
+	ConfigBothPanics   bool   `json:"config_both_panics"`
 }
 
 func pathFromSeed(seed string) []pathPart {
@@ -115,6 +120,29 @@ func FuzzUpstreamSonicParity(f *testing.F) {
 			t.Fatalf("sonic parity mismatch\ndata: %q\npath: %+v\nlocal: %+v\nupstream: %+v", data, req.Path, local, upstream)
 		}
 	})
+}
+
+func TestSonicCompatibilityProbeParity(t *testing.T) {
+	for _, data := range []string{
+		`1`,
+		`1.5`,
+		`{"a":1}x`,
+		`tru`,
+		`1e`,
+		`{"a":1]`,
+		`"\q"`,
+	} {
+		req := request{Data: base64.StdEncoding.EncodeToString([]byte(data))}
+		local := runHelper(t, filepath.Join("local"), req)
+		upstream := runHelper(t, filepath.Join("upstream"), req)
+		if !reflect.DeepEqual(local, upstream) {
+			t.Fatalf("sonic compatibility probe mismatch\ndata: %q\nlocal: %+v\nupstream: %+v", data, local, upstream)
+		}
+
+		if data == "1" && (local.PreorderOnlyNumber == "" || local.SkipEnd == 0 || !local.ConfigBothPanics) {
+			t.Fatalf("sonic compatibility probe protocol unavailable\ndata: %q\nresult: %+v", data, local)
+		}
+	}
 }
 
 func TestMalformedNumberParity(t *testing.T) {

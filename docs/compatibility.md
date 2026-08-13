@@ -100,6 +100,25 @@ shape and numeric code space on a best-effort basis. The error type and codes
 are intended for source compatibility, but exact wording and every edge-case
 classification may differ from upstream Sonic's native parser.
 
+`ast.Preorder`, like Sonic, stops after the root value and ignores trailing
+data. For every valid JSON number, `VisitorOptions.OnlyNumber` calls
+`OnFloat64(0, raw json.Number)`, preserving the raw number and never calling
+`OnInt64`. Container callback capacities differ intentionally: this
+implementation supplies a content estimate, whereas upstream Sonic uses a
+fixed capacity of 16 for non-empty containers; callers must treat capacity as
+a preallocation hint.
+
+Unloaded `ast.NewRaw` nodes report the same concrete root `Type()` values as
+Sonic. `decoder.Skip` also aligns its negative error start code and diagnostic
+cursor with Sonic for malformed input. A root API configured with both
+`UseNumber` and `UseInt64` panics, matching Sonic's conflicting-option
+behavior.
+
+### Stream encoding
+
+Stream encoders retry short writes until the encoded output is fully written.
+If a writer makes no progress, the encoder returns `io.ErrShortWrite`.
+
 ### `encoding/json` fallback limits
 
 The root/default reflection fallback accepts Sonic configuration fields, but
@@ -108,6 +127,10 @@ some flags are only partially implemented or necessarily follow
 case matching, marshaler, string-copying, and native codec behaviors that
 depend on Sonic's JIT engine. Unsupported or partially supported flags are
 accepted for source compatibility rather than rejected.
+
+These advanced configuration differences remain a configuration gap and were
+not expanded in this compatibility pass. This document does not claim complete
+Sonic configuration compatibility or bug-free equivalence.
 
 ### `stdjsonv2` limits
 
