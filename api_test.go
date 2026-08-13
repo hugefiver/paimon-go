@@ -3,6 +3,8 @@ package sonic
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
+	"io"
 	"reflect"
 	"strings"
 	"testing"
@@ -148,6 +150,45 @@ func TestConfigUseInt64StreamDecoderConvertsNestedInterfaceValues(t *testing.T) 
 	}
 }
 
+func TestConfigPanicsOnUseNumberAndUseInt64(t *testing.T) {
+	api := Config{UseNumber: true, UseInt64: true}.Froze()
+	const want = "can't set OptionUseInt64 and OptionUseNumber both!"
+
+	tests := []struct {
+		name   string
+		invoke func()
+	}{
+		{
+			name: "Unmarshal",
+			invoke: func() {
+				var out interface{}
+				_ = api.Unmarshal([]byte(`null`), &out)
+			},
+		},
+		{
+			name: "NewDecoder",
+			invoke: func() {
+				_ = api.NewDecoder(strings.NewReader(`null`))
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var got interface{}
+			func() {
+				defer func() {
+					got = recover()
+				}()
+				tt.invoke()
+			}()
+			if got != want {
+				t.Fatalf("panic = %v, want %q", got, want)
+			}
+		})
+	}
+}
+
 func TestConfigUnmarshalRejectsTrailingGarbageInDecoderBackedPaths(t *testing.T) {
 	tests := []struct {
 		name string
@@ -204,6 +245,57 @@ func TestConfigNoEncoderNewlineSuppressesStreamTrailingNewline(t *testing.T) {
 	if got := buf.String(); got != "\"x\"\n" {
 		t.Fatalf("default encoded = %q, want quoted x plus newline", got)
 	}
+}
+
+func TestRootStreamEncoderCompletesShortWrites(t *testing.T) {
+	w := &rootOneByteWriter{}
+	enc := Config{}.Froze().NewEncoder(w)
+	if err := enc.Encode(map[string]int{"a": 1}); err != nil {
+		t.Fatalf("Encode error = %v", err)
+	}
+	if got := w.String(); got != "{\"a\":1}\n" {
+		t.Fatalf("encoded = %q, want %q", got, "{\"a\":1}\n")
+	}
+}
+
+func TestRootStreamEncoderRejectsZeroProgress(t *testing.T) {
+	enc := Config{}.Froze().NewEncoder(rootZeroProgressWriter{})
+	if err := enc.Encode(map[string]int{"a": 1}); !errors.Is(err, io.ErrShortWrite) {
+		t.Fatalf("Encode error = %v, want io.ErrShortWrite", err)
+	}
+}
+
+func TestRootStreamEncoderPropagatesWriterError(t *testing.T) {
+	want := errors.New("write boom")
+	enc := Config{}.Froze().NewEncoder(rootErrWriter{err: want})
+	if err := enc.Encode(map[string]int{"a": 1}); err != want {
+		t.Fatalf("Encode error = %v, want original error %v", err, want)
+	}
+}
+
+type rootOneByteWriter struct {
+	bytes.Buffer
+}
+
+func (w *rootOneByteWriter) Write(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	return w.Buffer.Write(p[:1])
+}
+
+type rootZeroProgressWriter struct{}
+
+func (rootZeroProgressWriter) Write([]byte) (int, error) {
+	return 0, nil
+}
+
+type rootErrWriter struct {
+	err error
+}
+
+func (w rootErrWriter) Write([]byte) (int, error) {
+	return 0, w.err
 }
 
 func TestRootCompileCompatibility(t *testing.T) {

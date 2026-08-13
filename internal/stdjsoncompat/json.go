@@ -29,6 +29,14 @@ import (
 	"github.com/bytedance/sonic/internal/jsonconv"
 )
 
+const conflictingNumberModes = "can't set OptionUseInt64 and OptionUseNumber both!"
+
+func validateNumberModes(cfg backend.Config) {
+	if cfg.UseNumber && cfg.UseInt64 {
+		panic(conflictingNumberModes)
+	}
+}
+
 // Marshal serializes v under cfg. EscapeHTML is honored by post-processing
 // the encoding/json output when false (encoding/json escapes HTML by
 // default); SortMapKeys is honored natively by encoding/json.
@@ -87,6 +95,7 @@ func MarshalIndent(v interface{}, prefix, indent string, cfg backend.Config) ([]
 
 // Unmarshal parses data into v under cfg.
 func Unmarshal(data []byte, v interface{}, cfg backend.Config) error {
+	validateNumberModes(cfg)
 	data = normalizeUnmarshalInput(data)
 	if cfg.UseNumber || cfg.UseInt64 {
 		dec := json.NewDecoder(bytes.NewReader(data))
@@ -190,6 +199,7 @@ func NewEncoder(w io.Writer, cfg backend.Config) backend.StreamEncoder {
 
 // NewDecoder returns a streaming decoder reading from r under cfg.
 func NewDecoder(r io.Reader, cfg backend.Config) backend.StreamDecoder {
+	validateNumberModes(cfg)
 	dec := json.NewDecoder(r)
 	if cfg.UseNumber || cfg.UseInt64 {
 		dec.UseNumber()
@@ -226,8 +236,17 @@ func (e *streamEncoder) Encode(v interface{}) error {
 	if e.noNewline && len(out) > 0 && out[len(out)-1] == '\n' {
 		out = out[:len(out)-1]
 	}
-	_, err := e.w.Write(out)
-	return err
+	for offset := 0; offset < len(out); {
+		n, err := e.w.Write(out[offset:])
+		if err != nil {
+			return err
+		}
+		if n <= 0 || n > len(out)-offset {
+			return io.ErrShortWrite
+		}
+		offset += n
+	}
+	return nil
 }
 
 func (e *streamEncoder) SetEscapeHTML(on bool) {

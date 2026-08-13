@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"io"
 	"math"
 	"reflect"
 	"sort"
@@ -476,10 +477,29 @@ func TestStreamEncoderEscapeHTML(t *testing.T) {
 }
 
 func TestStreamEncoderWriteError(t *testing.T) {
-	enc := NewStreamEncoder(errWriter{err: errors.New("write boom")})
+	want := errors.New("write boom")
+	enc := NewStreamEncoder(errWriter{err: want})
 	err := enc.Encode("hello")
-	if err == nil || err.Error() != "write boom" {
-		t.Fatalf("expected write error, got %v", err)
+	if err != want {
+		t.Fatalf("Encode error = %v, want original error %v", err, want)
+	}
+}
+
+func TestStreamEncoderCompletesShortWrites(t *testing.T) {
+	w := &oneByteWriter{}
+	enc := NewStreamEncoder(w)
+	if err := enc.Encode(map[string]int{"a": 1}); err != nil {
+		t.Fatalf("Encode error = %v", err)
+	}
+	if got := w.String(); got != "{\"a\":1}\n" {
+		t.Fatalf("encoded = %q, want %q", got, "{\"a\":1}\n")
+	}
+}
+
+func TestStreamEncoderRejectsZeroProgress(t *testing.T) {
+	enc := NewStreamEncoder(zeroProgressWriter{})
+	if err := enc.Encode(map[string]int{"a": 1}); !errors.Is(err, io.ErrShortWrite) {
+		t.Fatalf("Encode error = %v, want io.ErrShortWrite", err)
 	}
 }
 
@@ -488,6 +508,23 @@ type errWriter struct{ err error }
 
 func (w errWriter) Write(p []byte) (int, error) {
 	return 0, w.err
+}
+
+type oneByteWriter struct {
+	bytes.Buffer
+}
+
+func (w *oneByteWriter) Write(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	return w.Buffer.Write(p[:1])
+}
+
+type zeroProgressWriter struct{}
+
+func (zeroProgressWriter) Write([]byte) (int, error) {
+	return 0, nil
 }
 
 // ---------------------------------------------------------------------------

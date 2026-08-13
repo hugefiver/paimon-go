@@ -49,6 +49,9 @@ func TestCompileCompatibilityRoot(t *testing.T) {
 		EncodeNullForInfOrNan:   true,
 		CaseSensitive:           true,
 	}
+	// This fixture uses cfg to exercise API methods below. Keep its full field
+	// coverage while avoiding the documented incompatible decoder modes.
+	cfg.UseInt64 = false
 	api := cfg.Froze()
 	_ = sonic.ConfigDefault
 	_ = sonic.ConfigStd

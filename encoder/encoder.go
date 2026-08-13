@@ -324,12 +324,26 @@ func (e *StreamEncoder) Encode(val interface{}) error {
 	if err != nil {
 		return err
 	}
-	if _, err := e.w.Write(out); err != nil {
-		return err
+	for offset := 0; offset < len(out); {
+		n, err := e.w.Write(out[offset:])
+		if err != nil {
+			return err
+		}
+		if n <= 0 || n > len(out)-offset {
+			return io.ErrShortWrite
+		}
+		offset += n
 	}
 	if e.Opts&NoEncoderNewline == 0 {
-		if _, err := e.w.Write(newlineBytes); err != nil {
-			return err
+		for offset := 0; offset < len(newlineBytes); {
+			n, err := e.w.Write(newlineBytes[offset:])
+			if err != nil {
+				return err
+			}
+			if n <= 0 || n > len(newlineBytes)-offset {
+				return io.ErrShortWrite
+			}
+			offset += n
 		}
 	}
 	return nil
