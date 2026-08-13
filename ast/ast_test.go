@@ -1,10 +1,12 @@
 package ast
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"reflect"
+	"strconv"
 	"testing"
 )
 
@@ -91,8 +93,8 @@ func TestNewRawInvalidReturnsErrorNode(t *testing.T) {
 
 func TestNewRawValidUnloadedNodeIsValid(t *testing.T) {
 	n := NewRaw(`{"ok":true}`)
-	if got := n.Type(); got != V_ANY {
-		t.Fatalf("Type() = %d, want V_ANY", got)
+	if got := n.Type(); got != V_OBJECT {
+		t.Fatalf("Type() = %d, want V_OBJECT", got)
 	}
 	if !n.IsRaw() {
 		t.Fatalf("IsRaw() = false, want true")
@@ -100,6 +102,96 @@ func TestNewRawValidUnloadedNodeIsValid(t *testing.T) {
 	if !n.Valid() {
 		t.Fatalf("unloaded valid raw node Valid() = false")
 	}
+}
+
+func TestNewRawReportsConcreteTypeBeforeLoad(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		input   string
+		wantTyp int
+		wantRaw string
+		object  bool
+	}{
+		{name: "null", input: `null`, wantTyp: V_NULL, wantRaw: `null`},
+		{name: "true", input: `true`, wantTyp: V_TRUE, wantRaw: `true`},
+		{name: "false", input: `false`, wantTyp: V_FALSE, wantRaw: `false`},
+		{name: "array", input: `[]`, wantTyp: V_ARRAY, wantRaw: `[]`},
+		{name: "object", input: `{}`, wantTyp: V_OBJECT, wantRaw: `{}`},
+		{name: "string", input: `"x"`, wantTyp: V_STRING, wantRaw: `"x"`},
+		{name: "number", input: `-1.5e2`, wantTyp: V_NUMBER, wantRaw: `-1.5e2`},
+		{name: "first value only", input: `  {"x":1} trailing`, wantTyp: V_OBJECT, wantRaw: `{"x":1}`, object: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			n := NewRaw(tt.input)
+			if got := n.Type(); got != tt.wantTyp {
+				t.Fatalf("Type() = %d, want %d", got, tt.wantTyp)
+			}
+			if !n.IsRaw() {
+				t.Fatal("IsRaw() = false, want true before Load")
+			}
+			if got, err := n.Raw(); err != nil || got != tt.wantRaw {
+				t.Fatalf("Raw() = %q, %v; want %q, nil", got, err, tt.wantRaw)
+			}
+			if tt.object {
+				if err := n.LoadAll(); err != nil {
+					t.Fatalf("LoadAll() error = %v", err)
+				}
+				if got, err := n.Get("x").Int64(); err != nil || got != 1 {
+					t.Fatalf("Get(\"x\").Int64() = %d, %v; want 1, nil", got, err)
+				}
+			}
+		})
+	}
+}
+
+func TestMarshalJSONPreservesUnloadedRawChildrenFirstValue(t *testing.T) {
+	arrayWithScalar := NewArray([]Node{NewRaw(`1 trailing`)})
+	objectWithArray := NewObject([]Pair{NewPair("array", NewRaw(` [true, false] trailing`))})
+	arrayWithObject := NewArray(nil)
+	if err := arrayWithObject.Add(NewRaw(`{"nested": 1} trailing`)); err != nil {
+		t.Fatalf("Add(raw object) error = %v", err)
+	}
+	objectWithString := NewObject(nil)
+	if added, err := objectWithString.Set("string", NewRaw(`"value" trailing`)); err != nil || !added {
+		t.Fatalf("Set(raw string) = %v, %v; want true, nil", added, err)
+	}
+
+	for _, tt := range []struct {
+		name string
+		node Node
+		want string
+	}{
+		{name: "constructor embeds raw scalar", node: arrayWithScalar, want: `[1]`},
+		{name: "constructor embeds raw array", node: objectWithArray, want: `{"array":[true, false]}`},
+		{name: "Add embeds raw object", node: arrayWithObject, want: `[{"nested": 1}]`},
+		{name: "Set embeds raw string", node: objectWithString, want: `{"string":"value"}`},
+		{name: "top level retains first raw value", node: NewRaw(` {"top": 1} trailing`), want: `{"top": 1}`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := tt.node.MarshalJSON()
+			if err != nil {
+				t.Fatalf("MarshalJSON() error = %v", err)
+			}
+			if string(got) != tt.want {
+				t.Fatalf("MarshalJSON() = %s, want raw first value %s", got, tt.want)
+			}
+			encoded, err := json.Marshal(&tt.node)
+			if err != nil {
+				t.Fatalf("json.Marshal(&Node) error = %v", err)
+			}
+			if compactJSON(string(encoded)) != compactJSON(tt.want) {
+				t.Fatalf("json.Marshal(&Node) = %s, want raw first value equivalent to %s", encoded, tt.want)
+			}
+		})
+	}
+}
+
+func compactJSON(s string) string {
+	var dst bytes.Buffer
+	if err := json.Compact(&dst, []byte(s)); err != nil {
+		return s
+	}
+	return dst.String()
 }
 
 func TestSyntaxErrorMethods(t *testing.T) {
@@ -213,7 +305,16 @@ func TestIteratorsAndForEach(t *testing.T) {
 	}
 }
 
-type recordingVisitor struct{ events []string }
+type recordedFloat struct {
+	value float64
+	raw   json.Number
+}
+
+type recordingVisitor struct {
+	events     []string
+	intCalls   []json.Number
+	floatCalls []recordedFloat
+}
 
 func (v *recordingVisitor) OnNull() error { v.events = append(v.events, "null"); return nil }
 func (v *recordingVisitor) OnBool(x bool) error {
@@ -230,10 +331,12 @@ func (v *recordingVisitor) OnString(s string) error {
 }
 func (v *recordingVisitor) OnInt64(_ int64, n json.Number) error {
 	v.events = append(v.events, "int:"+n.String())
+	v.intCalls = append(v.intCalls, n)
 	return nil
 }
-func (v *recordingVisitor) OnFloat64(_ float64, n json.Number) error {
+func (v *recordingVisitor) OnFloat64(f float64, n json.Number) error {
 	v.events = append(v.events, "float:"+n.String())
+	v.floatCalls = append(v.floatCalls, recordedFloat{value: f, raw: n})
 	return nil
 }
 func (v *recordingVisitor) OnObjectBegin(capacity int) error {
@@ -262,6 +365,154 @@ func TestPreorderVisitor(t *testing.T) {
 	}
 }
 
+func TestPreorderOnlyNumberMatchesSonic(t *testing.T) {
+	visitor := &recordingVisitor{}
+	if err := Preorder(`{"i":1,"f":1.5}`, visitor, &VisitorOptions{OnlyNumber: true}); err != nil {
+		t.Fatalf("Preorder() error = %v", err)
+	}
+	if len(visitor.intCalls) != 0 {
+		t.Fatalf("OnInt64 calls = %#v, want none", visitor.intCalls)
+	}
+	if got, want := visitor.floatCalls, []recordedFloat{
+		{value: 0, raw: json.Number("1")},
+		{value: 0, raw: json.Number("1.5")},
+	}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("OnFloat64 calls = %#v, want %#v", got, want)
+	}
+
+	if err := Preorder(`1e`, &recordingVisitor{}, &VisitorOptions{OnlyNumber: true}); err == nil {
+		t.Fatal("Preorder(1e) error = nil, want SyntaxError")
+	} else if _, ok := err.(*SyntaxError); !ok {
+		t.Fatalf("Preorder(1e) error = %T, want *SyntaxError", err)
+	}
+}
+
+func TestPreorderInvalidUTF8MatchesSonic(t *testing.T) {
+	invalidLead := string([]byte{0xe4})
+	invalidContinuation := string([]byte{0xc3, 0x28})
+	invalidThreeByte := string([]byte{0xe2, 0x28, 0xa1})
+
+	for _, tt := range []struct {
+		name  string
+		input string
+		want  []string
+	}{
+		{
+			name:  "object key invalid lead",
+			input: `{"d` + invalidLead + `":1}`,
+			want:  []string{"object", "key:d" + invalidLead, "float:1", "object-end"},
+		},
+		{
+			name:  "string value invalid lead",
+			input: `{"k":"d` + invalidLead + `"}`,
+			want:  []string{"object", "key:k", "string:d" + invalidLead, "object-end"},
+		},
+		{
+			name:  "root string invalid lead",
+			input: `"d` + invalidLead + `"`,
+			want:  []string{"string:d" + invalidLead},
+		},
+		{
+			name:  "object key invalid continuation",
+			input: `{"d` + invalidContinuation + `":1}`,
+			want:  []string{"object", "key:d" + invalidContinuation, "float:1", "object-end"},
+		},
+		{
+			name:  "string value invalid continuation",
+			input: `{"k":"d` + invalidContinuation + `"}`,
+			want:  []string{"object", "key:k", "string:d" + invalidContinuation, "object-end"},
+		},
+		{
+			name:  "object key invalid three byte sequence",
+			input: `{"d` + invalidThreeByte + `":1}`,
+			want:  []string{"object", "key:d" + invalidThreeByte, "float:1", "object-end"},
+		},
+		{
+			name:  "string value invalid three byte sequence",
+			input: `{"k":"d` + invalidThreeByte + `"}`,
+			want:  []string{"object", "key:k", "string:d" + invalidThreeByte, "object-end"},
+		},
+		{
+			name:  "valid utf8",
+			input: `"dé"`,
+			want:  []string{"string:dé"},
+		},
+		{
+			name:  "fuzz corpus retains every number",
+			input: `{"users":[{"id":1},{"d` + invalidLead + `":2}]}`,
+			want: []string{
+				"object", "key:users", "array", "object", "key:id", "float:1", "object-end",
+				"object", "key:d" + invalidLead, "float:2", "object-end", "array-end", "object-end",
+			},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			visitor := &recordingVisitor{}
+			if err := Preorder(tt.input, visitor, &VisitorOptions{OnlyNumber: true}); err != nil {
+				t.Fatalf("Preorder() error = %T: %v", err, err)
+			}
+			if !reflect.DeepEqual(visitor.events, tt.want) {
+				t.Fatalf("events = %#v, want %#v", visitor.events, tt.want)
+			}
+			for _, call := range visitor.floatCalls {
+				if call.value != 0 {
+					t.Fatalf("OnFloat64 value = %v, want 0 when OnlyNumber is true", call.value)
+				}
+			}
+		})
+	}
+
+	visitor := &recordingVisitor{}
+	if err := Preorder("\"a\x01\"", visitor, &VisitorOptions{OnlyNumber: true}); err != nil {
+		t.Fatalf("Preorder(raw control) error = %v", err)
+	}
+	if want := []string{"string:a\x01"}; !reflect.DeepEqual(visitor.events, want) {
+		t.Fatalf("raw control events = %#v, want %#v", visitor.events, want)
+	}
+}
+
+type capacityVisitor struct {
+	objectCapacity int
+	arrayCapacity  int
+}
+
+func (*capacityVisitor) OnNull() error                    { return nil }
+func (*capacityVisitor) OnBool(bool) error                { return nil }
+func (*capacityVisitor) OnString(string) error            { return nil }
+func (*capacityVisitor) OnInt64(int64, json.Number) error { return nil }
+func (*capacityVisitor) OnFloat64(float64, json.Number) error {
+	return nil
+}
+func (v *capacityVisitor) OnObjectBegin(capacity int) error {
+	v.objectCapacity = capacity
+	return nil
+}
+func (*capacityVisitor) OnObjectKey(string) error { return nil }
+func (*capacityVisitor) OnObjectEnd() error       { return nil }
+func (v *capacityVisitor) OnArrayBegin(capacity int) error {
+	v.arrayCapacity = capacity
+	return nil
+}
+func (*capacityVisitor) OnArrayEnd() error { return nil }
+
+func TestPreorderKeepsEstimatedContainerCapacity(t *testing.T) {
+	visitor := &capacityVisitor{}
+	if err := Preorder(`{}`, visitor, nil); err != nil {
+		t.Fatalf("Preorder({}) error = %v", err)
+	}
+	if visitor.objectCapacity != 0 {
+		t.Fatalf("object capacity = %d, want 0", visitor.objectCapacity)
+	}
+
+	visitor = &capacityVisitor{}
+	if err := Preorder(`[1]`, visitor, nil); err != nil {
+		t.Fatalf("Preorder([1]) error = %v", err)
+	}
+	if visitor.arrayCapacity != 1 {
+		t.Fatalf("array capacity = %d, want 1", visitor.arrayCapacity)
+	}
+}
+
 func TestSearcherAndParser(t *testing.T) {
 	s := NewSearcher(`{"users":[{"id":1},{"id":2}]}`)
 	n, err := s.GetByPath("users", 1, "id")
@@ -275,6 +526,22 @@ func TestSearcherAndParser(t *testing.T) {
 	_, perr := p.Parse()
 	if perr == 0 {
 		t.Fatalf("Parse invalid JSON returned no ParsingError")
+	}
+}
+
+func TestInt64PathOverflowIsMissing(t *testing.T) {
+	if strconv.IntSize != 32 {
+		t.Skip("int64-to-int path overflow requires a 32-bit architecture")
+	}
+
+	n := NewRaw(`["zero"]`)
+	if n.GetByPath(int64(1 << 32)).Exists() {
+		t.Fatal("Node.GetByPath(int64(1 << 32)).Exists() = true, want false")
+	}
+
+	_, err := NewSearcher(`["zero"]`).GetByPath(int64(1 << 32))
+	if !errors.Is(err, ErrNotExist) {
+		t.Fatalf("Searcher.GetByPath(int64(1 << 32)) error = %v, want ErrNotExist", err)
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	nativetypes "github.com/bytedance/sonic/internal/native/types"
 )
@@ -247,6 +248,9 @@ func (p *preorderParser) parseNumber(visitor Visitor) error {
 	}
 	numStr := s[start:p.pos]
 	num := json.Number(numStr)
+	if p.onlyNumber {
+		return visitor.OnFloat64(0, num)
+	}
 	// Prefer int64 when the number has no '.' or 'e' and fits.
 	if !strings.ContainsAny(numStr, ".eE") {
 		if i, err := strconv.ParseInt(numStr, 10, 64); err == nil {
@@ -321,18 +325,18 @@ func (p *preorderParser) parseString() (string, error) {
 			}
 			continue
 		}
-		if c < 0x20 {
-			return "", &SyntaxError{Pos: p.pos, Src: p.src, Code: nativetypes.ERR_INVALID_CHAR, Msg: "control char in string"}
-		}
 		if c < 0x80 {
 			b.WriteByte(c)
 			p.pos++
 			continue
 		}
-		// Multi-byte UTF-8: copy the whole rune verbatim.
-		size := utf8RuneSize(c)
-		if p.pos+size > len(s) {
-			return "", &SyntaxError{Pos: p.pos, Src: p.src, Code: nativetypes.ERR_INVALID_UTF8, Msg: "truncated utf8"}
+		_, size := utf8.DecodeRuneInString(s[p.pos:])
+		if size == 1 {
+			// Sonic preserves malformed bytes, but they must not consume a
+			// following JSON delimiter such as the closing quote.
+			b.WriteByte(c)
+			p.pos++
+			continue
 		}
 		b.WriteString(s[p.pos : p.pos+size])
 		p.pos += size
@@ -516,20 +520,4 @@ func (p *preorderParser) guessContainerSize() int {
 	}
 	p.pos = saved
 	return 0
-}
-
-// utf8RuneSize returns the expected byte length of a UTF-8 rune given
-// its leading byte.
-func utf8RuneSize(b byte) int {
-	switch {
-	case b < 0x80:
-		return 1
-	case b&0xE0 == 0xC0:
-		return 2
-	case b&0xF0 == 0xE0:
-		return 3
-	case b&0xF8 == 0xF0:
-		return 4
-	}
-	return 1
 }

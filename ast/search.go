@@ -85,11 +85,14 @@ func (s *Searcher) getByPath(path []interface{}, copyReturn bool) (Node, error) 
 			}
 			cur = arr[x]
 		case int64:
+			idx, ok := intFromInt64(x)
+			if !ok {
+				return Node{}, ErrNotExist
+			}
 			arr, err := cur.Array()
 			if err != nil {
 				return Node{}, ErrNotExist
 			}
-			idx := int(x)
 			if idx < 0 || idx >= len(arr) {
 				return Node{}, ErrNotExist
 			}
@@ -183,8 +186,8 @@ func getPathRaw(src string, path []interface{}) (Node, rawPathStatus) {
 				return Node{}, status
 			}
 		case int64:
-			idx := int(x)
-			if int64(idx) != x {
+			idx, ok := intFromInt64(x)
+			if !ok {
 				return Node{}, rawPathMissing
 			}
 			var status rawPathStatus

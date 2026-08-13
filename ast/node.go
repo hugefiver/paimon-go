@@ -51,8 +51,8 @@ func NewObject(v []Pair) Node {
 func NewPair(key string, val Node) Pair { return Pair{Key: key, Value: val} }
 
 // NewRaw builds a raw JSON Node. The Node is not parsed until Load / LoadAll
-// is called. Raw nodes report Type() as V_ANY and IsRaw() as true before
-// being loaded.
+// is called. Before loading, it reports the type of its root JSON token and
+// IsRaw() as true.
 func NewRaw(j string) Node {
 	start := 0
 	for start < len(j) && isJSONSpace(j[start]) {
@@ -69,7 +69,22 @@ func NewRaw(j string) Node {
 	if !validRootRaw(raw) {
 		return Node{typ: V_ERROR, exists: true, loaded: true, err: SyntaxError{Pos: len(raw), Src: raw, Code: nativetypes.ERR_INVALID_CHAR}}
 	}
-	return Node{typ: V_ANY, exists: true, raw: raw}
+	typ := V_NUMBER
+	switch raw[0] {
+	case 'n':
+		typ = V_NULL
+	case 't':
+		typ = V_TRUE
+	case 'f':
+		typ = V_FALSE
+	case '[':
+		typ = V_ARRAY
+	case '{':
+		typ = V_OBJECT
+	case '"':
+		typ = V_STRING
+	}
+	return Node{typ: typ, exists: true, raw: raw}
 }
 
 // NewRawConcurrentRead is identical to NewRaw. The Sonic v1.15.2 surface
@@ -97,8 +112,8 @@ func NewAny(v interface{}) Node {
 // Type / state queries
 // ---------------------------------------------------------------------------
 
-// Type returns the node's type tag. For an unloaded raw node it returns
-// V_ANY. For an absent node it returns V_NONE.
+// Type returns the node's type tag. Unloaded raw nodes report the type of
+// their root JSON token. Absent nodes return V_NONE.
 func (n Node) Type() int { return n.typ }
 
 // TypeSafe is identical to Type for this implementation; it is kept on
@@ -133,7 +148,7 @@ func (n *Node) Valid() bool {
 }
 
 // IsRaw reports whether the node is an unloaded raw JSON node.
-func (n Node) IsRaw() bool { return n.typ == V_ANY && !n.loaded }
+func (n Node) IsRaw() bool { return !n.loaded && n.raw != "" }
 
 // Error returns the node's error string. For an absent node it is the
 // ErrNotExist message; for an error node it is the underlying error's
@@ -178,12 +193,13 @@ func (n *Node) LoadAll() error {
 	if n == nil {
 		return ErrNotExist
 	}
-	if n.typ != V_ANY || n.loaded {
+	if !n.IsRaw() {
 		return nil
 	}
 	parsed, perr := parseRawToNode(n.raw)
 	if perr != 0 {
 		n.typ = V_ERROR
+		n.loaded = true
 		n.err = perr
 		return perr
 	}
@@ -469,7 +485,11 @@ func (n *Node) GetByPath(path ...interface{}) *Node {
 		case int:
 			cur = cur.Index(s)
 		case int64:
-			cur = cur.Index(int(s))
+			idx, ok := intFromInt64(s)
+			if !ok {
+				return newMissing()
+			}
+			cur = cur.Index(idx)
 		case json.Number:
 			if idx, err := strconv.Atoi(string(s)); err == nil {
 				cur = cur.Index(idx)
@@ -1032,7 +1052,7 @@ func (n *Node) Raw() (string, error) {
 	if n == nil || !n.exists {
 		return "", ErrNotExist
 	}
-	if n.typ == V_ANY && !n.loaded {
+	if n.IsRaw() {
 		return n.raw, nil
 	}
 	var b []byte
@@ -1045,7 +1065,7 @@ func (n *Node) MarshalJSON() ([]byte, error) {
 	if n == nil || !n.exists {
 		return []byte("null"), nil
 	}
-	if n.typ == V_ANY && !n.loaded {
+	if n.IsRaw() {
 		return []byte(n.raw), nil
 	}
 	var b []byte
@@ -1167,6 +1187,9 @@ func nodeFromInterface(v interface{}) (Node, error) {
 func appendNodeJSON(dst []byte, n *Node, escapeHTML bool) []byte {
 	if n == nil || !n.exists {
 		return append(dst, "null"...)
+	}
+	if n.IsRaw() {
+		return append(dst, n.raw...)
 	}
 	switch n.typ {
 	case V_NULL:
@@ -1291,6 +1314,11 @@ func decodeRune(s string) (r rune, size int) {
 // internal helpers
 // ---------------------------------------------------------------------------
 
+func intFromInt64(v int64) (int, bool) {
+	i := int(v)
+	return i, int64(i) == v
+}
+
 // newMissing returns a pointer to a fresh non-existent node.
 func newMissing() *Node {
 	return &Node{typ: V_NONE, exists: false, err: ErrNotExist}
@@ -1305,7 +1333,7 @@ func (n *Node) ensureLoaded() error {
 	if n == nil {
 		return ErrNotExist
 	}
-	if n.typ == V_ANY && !n.loaded {
+	if n.IsRaw() {
 		return n.LoadAll()
 	}
 	return nil
