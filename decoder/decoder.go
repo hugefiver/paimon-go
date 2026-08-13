@@ -132,105 +132,355 @@ func PretouchMany(_ []reflect.Type, _ ...option.CompileOption) error { return ni
 // value that contains structural characters inside strings or nested
 // containers is reported correctly.
 //
-// When data does not contain a complete JSON value, Skip returns
-// (0, 0).
+// On malformed or incomplete input, Skip returns -int(nativetypes.ParsingError)
+// as start and the scanner cursor as end. Error cursors are diagnostic only
+// and may be beyond len(data), so callers must slice data[start:end] only
+// when start is non-negative.
 //
 // The returned bounds are suitable for slicing data[start:end] to
 // obtain the raw JSON text of the value, including any internal
 // whitespace between tokens.
 func Skip(data []byte) (start int, end int) {
-	// Skip leading whitespace.
 	i := 0
 	for i < len(data) && isSpace(data[i]) {
 		i++
 	}
 	if i >= len(data) {
-		return 0, 0
+		return -int(nativetypes.ERR_EOF), 4
 	}
-	start = i
 
-	switch data[i] {
-	case '"':
-		// Top-level JSON string. Scan to the matching closing quote,
-		// honoring backslash escapes. A truncated escape or an
-		// unterminated string means there is no complete value.
-		i++
-		for i < len(data) {
-			if data[i] == '\\' {
-				if i+1 >= len(data) {
-					return 0, 0
+	s := skipScanner{data: data, pos: i}
+	end, failure := s.scan()
+	if failure != nil {
+		return -int(failure.code), failure.cursor
+	}
+	return i, end
+}
+
+type skipFailure struct {
+	code   nativetypes.ParsingError
+	cursor int
+}
+
+type skipState uint8
+
+const (
+	skipArrayValueOrEnd skipState = iota
+	skipArrayValue
+	skipArrayCommaOrEnd
+	skipObjectKeyOrEnd
+	skipObjectKey
+	skipObjectColon
+	skipObjectValue
+	skipObjectCommaOrEnd
+)
+
+type skipFrame struct {
+	state skipState
+}
+
+const maxSkipContainerDepth = 4096
+
+// skipScanner recognizes one JSON value without decoding it. Its string
+// scanner deliberately accepts arbitrary escape bytes and raw controls to
+// retain Sonic Skip's permissive string behavior.
+type skipScanner struct {
+	data []byte
+	pos  int
+}
+
+func (s *skipScanner) scan() (int, *skipFailure) {
+	frames := make([]skipFrame, 0, 8)
+	complete, failure := s.scanValue(&frames)
+	if failure != nil {
+		return 0, failure
+	}
+	if complete {
+		return s.pos, nil
+	}
+
+	for {
+		frame := &frames[len(frames)-1]
+		s.skipSpace()
+		if s.objectValueAtDepthLimit(frames) {
+			return 0, s.recurseExceededAfterObjectColon()
+		}
+		if s.atEnd() {
+			return 0, s.containerEOF()
+		}
+		if s.data[s.pos] == 0 {
+			return 0, s.nulEOF()
+		}
+
+		switch frame.state {
+		case skipArrayValueOrEnd:
+			if s.data[s.pos] == ']' {
+				if end, done := s.closeContainer(&frames); done {
+					return end, nil
 				}
-				i += 2
 				continue
 			}
-			if data[i] == '"' {
-				i++
-				return start, i
+			complete, failure = s.scanValue(&frames)
+			if failure != nil {
+				return 0, failure
 			}
-			i++
-		}
-		return 0, 0
-	case '{', '[':
-		// Top-level container. Count nested objects and arrays, and
-		// skip over string literals so structural characters inside
-		// strings do not affect the depth counter.
-		depth := 1
-		i++
-		for i < len(data) && depth > 0 {
-			c := data[i]
-			switch c {
-			case '"':
-				// Scan the string body in place.
-				i++
-				for i < len(data) {
-					if data[i] == '\\' {
-						if i+1 >= len(data) {
-							return 0, 0
-						}
-						i += 2
-						continue
-					}
-					if data[i] == '"' {
-						i++
-						break
-					}
-					i++
+			if complete {
+				s.completeValue(frames)
+			}
+
+		case skipArrayValue:
+			complete, failure = s.scanValue(&frames)
+			if failure != nil {
+				return 0, failure
+			}
+			if complete {
+				s.completeValue(frames)
+			}
+
+		case skipArrayCommaOrEnd:
+			switch s.data[s.pos] {
+			case ']':
+				if end, done := s.closeContainer(&frames); done {
+					return end, nil
 				}
-				// If the for loop above exited because i >= len(data),
-				// the string is unterminated; fall through to the
-				// outer check below.
-			case '{', '[':
-				depth++
-				i++
-			case '}', ']':
-				depth--
-				i++
-				if depth == 0 {
-					return start, i
-				}
+			case ',':
+				s.pos++
+				frames[len(frames)-1].state = skipArrayValue
 			default:
-				i++
+				return 0, s.invalid()
+			}
+
+		case skipObjectKeyOrEnd:
+			if s.data[s.pos] == '}' {
+				if end, done := s.closeContainer(&frames); done {
+					return end, nil
+				}
+				continue
+			}
+			if s.data[s.pos] != '"' {
+				return 0, s.invalid()
+			}
+			if failure = s.scanString(); failure != nil {
+				return 0, failure
+			}
+			frames[len(frames)-1].state = skipObjectColon
+
+		case skipObjectKey:
+			if s.data[s.pos] != '"' {
+				return 0, s.invalid()
+			}
+			if failure = s.scanString(); failure != nil {
+				return 0, failure
+			}
+			frames[len(frames)-1].state = skipObjectColon
+
+		case skipObjectColon:
+			if s.data[s.pos] != ':' {
+				return 0, s.invalid()
+			}
+			s.pos++
+			frames[len(frames)-1].state = skipObjectValue
+
+		case skipObjectValue:
+			complete, failure = s.scanValue(&frames)
+			if failure != nil {
+				return 0, failure
+			}
+			if complete {
+				s.completeValue(frames)
+			}
+
+		case skipObjectCommaOrEnd:
+			switch s.data[s.pos] {
+			case '}':
+				if end, done := s.closeContainer(&frames); done {
+					return end, nil
+				}
+			case ',':
+				s.pos++
+				frames[len(frames)-1].state = skipObjectKey
+			default:
+				return 0, s.invalid()
 			}
 		}
-		if depth != 0 {
-			return 0, 0
-		}
-		return start, i
-	default:
-		// Bare token: number, true, false, null. The value ends at
-		// the next whitespace, comma (top-level separator), closing
-		// brace/bracket, or end of input. A colon is included for
-		// safety even though it should not appear at the top level.
-		j := i
-		for j < len(data) && !isSpace(data[j]) && data[j] != ',' && data[j] != '}' && data[j] != ']' {
-			j++
-		}
-		if j == start {
-			return 0, 0
-		}
-		return start, j
 	}
 }
+
+func (s *skipScanner) scanValue(frames *[]skipFrame) (bool, *skipFailure) {
+	if s.objectValueAtDepthLimit(*frames) {
+		return false, s.recurseExceededAfterObjectColon()
+	}
+	if s.atEnd() {
+		return false, &skipFailure{code: nativetypes.ERR_EOF, cursor: s.pos}
+	}
+
+	switch s.data[s.pos] {
+	case 0:
+		return false, s.nulEOF()
+	case '[':
+		if len(*frames) >= maxSkipContainerDepth {
+			return false, s.recurseExceededAfterOpening()
+		}
+		s.pos++
+		*frames = append(*frames, skipFrame{state: skipArrayValueOrEnd})
+		return false, nil
+	case '{':
+		if len(*frames) >= maxSkipContainerDepth {
+			return false, s.recurseExceededAfterOpening()
+		}
+		s.pos++
+		*frames = append(*frames, skipFrame{state: skipObjectKeyOrEnd})
+		return false, nil
+	case '"':
+		if failure := s.scanString(); failure != nil {
+			return false, failure
+		}
+		return true, nil
+	case 't':
+		return s.scanLiteral("true")
+	case 'f':
+		return s.scanLiteral("false")
+	case 'n':
+		return s.scanLiteral("null")
+	case '-', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9':
+		return s.scanNumber()
+	default:
+		return false, s.invalid()
+	}
+}
+
+func (s *skipScanner) objectValueAtDepthLimit(frames []skipFrame) bool {
+	return len(frames) >= maxSkipContainerDepth && frames[len(frames)-1].state == skipObjectValue
+}
+
+func (s *skipScanner) recurseExceededAfterOpening() *skipFailure {
+	return &skipFailure{code: nativetypes.ERR_RECURSE_EXCEED_MAX, cursor: s.pos + 1}
+}
+
+func (s *skipScanner) recurseExceededAfterObjectColon() *skipFailure {
+	return &skipFailure{code: nativetypes.ERR_RECURSE_EXCEED_MAX, cursor: s.pos - 1}
+}
+
+func (s *skipScanner) scanString() *skipFailure {
+	s.pos++ // opening quote
+	for !s.atEnd() {
+		switch s.data[s.pos] {
+		case '\\':
+			s.pos++
+			if s.atEnd() {
+				return &skipFailure{code: nativetypes.ERR_EOF, cursor: s.pos}
+			}
+			s.pos++
+		case '"':
+			s.pos++
+			return nil
+		default:
+			s.pos++
+		}
+	}
+	return &skipFailure{code: nativetypes.ERR_EOF, cursor: s.pos}
+}
+
+func (s *skipScanner) scanLiteral(literal string) (bool, *skipFailure) {
+	for i := 0; i < len(literal); i++ {
+		at := s.pos + i
+		if at >= len(s.data) {
+			return false, &skipFailure{code: nativetypes.ERR_EOF, cursor: at}
+		}
+		if s.data[at] != literal[i] {
+			return false, &skipFailure{code: nativetypes.ERR_INVALID_CHAR, cursor: at}
+		}
+	}
+	s.pos += len(literal)
+	return true, nil
+}
+
+func (s *skipScanner) scanNumber() (bool, *skipFailure) {
+	if s.data[s.pos] == '-' {
+		s.pos++
+		if s.atEnd() || !isDigit(s.data[s.pos]) {
+			return false, &skipFailure{code: nativetypes.ERR_INVALID_CHAR, cursor: s.pos}
+		}
+	}
+
+	if s.data[s.pos] == '0' {
+		s.pos++
+	} else {
+		for !s.atEnd() && isDigit(s.data[s.pos]) {
+			s.pos++
+		}
+	}
+
+	if !s.atEnd() && s.data[s.pos] == '.' {
+		fraction := s.pos
+		s.pos++
+		if s.atEnd() || !isDigit(s.data[s.pos]) {
+			return false, &skipFailure{code: nativetypes.ERR_INVALID_CHAR, cursor: fraction}
+		}
+		for !s.atEnd() && isDigit(s.data[s.pos]) {
+			s.pos++
+		}
+	}
+
+	if !s.atEnd() && (s.data[s.pos] == 'e' || s.data[s.pos] == 'E') {
+		exponent := s.pos
+		s.pos++
+		if !s.atEnd() && (s.data[s.pos] == '+' || s.data[s.pos] == '-') {
+			exponent = s.pos
+			s.pos++
+		}
+		if s.atEnd() || !isDigit(s.data[s.pos]) {
+			return false, &skipFailure{code: nativetypes.ERR_INVALID_CHAR, cursor: exponent}
+		}
+		for !s.atEnd() && isDigit(s.data[s.pos]) {
+			s.pos++
+		}
+	}
+
+	return true, nil
+}
+
+func (s *skipScanner) closeContainer(frames *[]skipFrame) (end int, done bool) {
+	s.pos++
+	*frames = (*frames)[:len(*frames)-1]
+	if len(*frames) == 0 {
+		return s.pos, true
+	}
+	s.completeValue(*frames)
+	return 0, false
+}
+
+func (s *skipScanner) completeValue(frames []skipFrame) {
+	last := len(frames) - 1
+	switch frames[last].state {
+	case skipArrayValueOrEnd, skipArrayValue:
+		frames[last].state = skipArrayCommaOrEnd
+	case skipObjectValue:
+		frames[last].state = skipObjectCommaOrEnd
+	}
+}
+
+func (s *skipScanner) skipSpace() {
+	for !s.atEnd() && isSpace(s.data[s.pos]) {
+		s.pos++
+	}
+}
+
+func (s *skipScanner) atEnd() bool { return s.pos >= len(s.data) }
+
+func (s *skipScanner) invalid() *skipFailure {
+	return &skipFailure{code: nativetypes.ERR_INVALID_CHAR, cursor: s.pos + 1}
+}
+
+func (s *skipScanner) containerEOF() *skipFailure {
+	return &skipFailure{code: nativetypes.ERR_EOF, cursor: len(s.data) + 4}
+}
+
+func (s *skipScanner) nulEOF() *skipFailure {
+	return &skipFailure{code: nativetypes.ERR_EOF, cursor: s.pos + 1}
+}
+
+func isDigit(c byte) bool { return c >= '0' && c <= '9' }
 
 // isSpace reports whether c is a JSON whitespace byte as defined by
 // RFC 8259: space, horizontal tab, line feed, carriage return.

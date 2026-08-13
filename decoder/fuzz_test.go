@@ -6,9 +6,8 @@ import (
 )
 
 // FuzzSkipNoPanic ensures decoder.Skip never panics on arbitrary bytes, and
-// that when it returns a valid range, the invariants hold:
+// that when it returns a successful range, the invariants hold:
 //   - 0 <= start <= end <= len(data)
-//   - when start == end the function reported no token (incomplete input)
 //
 // Furthermore, for inputs that are valid complete JSON values, the slice
 // data[start:end] must be valid JSON.
@@ -50,24 +49,17 @@ func FuzzSkipNoPanic(f *testing.F) {
 			start, end = Skip(data)
 		}()
 
-		// Invariants.
-		if start < 0 {
-			t.Fatalf("start < 0: %d (data=%q)", start, data)
-		}
-		if end < 0 {
-			t.Fatalf("end < 0: %d (data=%q)", end, data)
-		}
-		if start > end {
-			t.Fatalf("start > end: %d > %d (data=%q)", start, end, data)
-		}
-		if end > len(data) {
-			t.Fatalf("end > len(data): %d > %d (data=%q)", end, len(data), data)
-		}
+		if start >= 0 {
+			if start > end {
+				t.Fatalf("start > end: %d > %d (data=%q)", start, end, data)
+			}
+			if end > len(data) {
+				t.Fatalf("end > len(data): %d > %d (data=%q)", end, len(data), data)
+			}
 
-		// When the input is a complete valid JSON value, the skipped slice
-		// should be valid JSON (Skip should consume exactly the value).
-		if start == 0 && end > 0 && end == len(data) {
-			if json.Valid(data) {
+			// When the input is a complete valid JSON value, the skipped slice
+			// should be valid JSON (Skip should consume exactly the value).
+			if start == 0 && end > 0 && end == len(data) && json.Valid(data) {
 				if !json.Valid(data[start:end]) {
 					t.Fatalf("skipped slice not valid JSON: %q (data=%q)", data[start:end], data)
 				}

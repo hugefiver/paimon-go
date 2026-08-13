@@ -6,6 +6,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	nativetypes "github.com/bytedance/sonic/internal/native/types"
 )
 
 // ---------------------------------------------------------------------------
@@ -510,20 +512,170 @@ func TestSkipLeadingWhitespace(t *testing.T) {
 	}
 }
 
-func TestSkipIncompleteReturnsZeroZero(t *testing.T) {
-	cases := [][]byte{
-		[]byte(``),
-		[]byte(`   `),
-		[]byte(`{"a":`),
-		[]byte(`[1, 2`),
-		[]byte(`"unclosed`),
-		[]byte(`"truncated\`),
+func TestSkipMalformedMatchesSonic(t *testing.T) {
+	cases := []struct {
+		in         string
+		start, end int
+	}{
+		{``, -1, 4}, {` `, -1, 4}, {`   `, -1, 4}, {"\t\r\n", -1, 4},
+		{`[1,]`, -2, 4}, {`[1 2]`, -2, 4}, {`[,1]`, -2, 2},
+		{`[true false]`, -2, 7}, {`[1,,2]`, -2, 4},
+		{`{"a" 1}`, -2, 6}, {`{"a":}`, -2, 6}, {`{"a":1,}`, -2, 8},
+		{`{,"a":1}`, -2, 2}, {`{"a":1 "b":2}`, -2, 8},
+		{`{"a":1,,"b":2}`, -2, 8},
+		{`{"a":1]`, -2, 7}, {`[1}`, -2, 3},
+		{`tru`, -1, 3}, {`truex`, 0, 4}, {`nullx`, 0, 4},
+		{`01`, 0, 1}, {`1.`, -2, 1}, {`1e`, -2, 1},
+		{`1e+`, -2, 2}, {`-`, -2, 1}, {`+1`, -2, 1}, {`NaN`, -2, 1},
+		{`"unclosed`, -1, 9}, {`"truncated\`, -1, 11},
+		{`{"a":`, -1, 9}, {`[1,2`, -1, 8},
+		{`"bad\q"`, 0, 7},
+		{string([]byte{'"', 'a', 0x01, '"'}), 0, 4},
+		{" \t\ntrue xyz", 3, 7},
 	}
-	for _, in := range cases {
-		start, end := Skip(in)
-		if start != 0 || end != 0 {
-			t.Fatalf("Skip(%q) = (%d,%d), want (0,0)", in, start, end)
+
+	for _, tc := range cases {
+		t.Run(tc.in, func(t *testing.T) {
+			start, end := Skip([]byte(tc.in))
+			if start != tc.start || end != tc.end {
+				t.Fatalf("Skip(%q) = (%d,%d), want (%d,%d)", tc.in, start, end, tc.start, tc.end)
+			}
+		})
+	}
+}
+
+func TestSkipContainerNULTerminatorMatchesSonic(t *testing.T) {
+	cases := []struct {
+		name       string
+		in         []byte
+		start, end int
+	}{
+		{"array-value", []byte{'[', '1', ',', 0x00}, -int(nativetypes.ERR_EOF), 4},
+		{"array-comma-or-end", []byte{'[', '1', 0x00}, -int(nativetypes.ERR_EOF), 3},
+		{"object-key", []byte{'{', '"', 'a', '"', ':', '1', ',', 0x00}, -int(nativetypes.ERR_EOF), 8},
+		{"object-colon", []byte{'{', '"', 'a', '"', 0x00}, -int(nativetypes.ERR_EOF), 5},
+		{"object-value", []byte{'{', '"', 'a', '"', ':', 0x00}, -int(nativetypes.ERR_EOF), 6},
+		{"whitespace-before-nul", []byte{'[', '1', ',', ' ', 0x00}, -int(nativetypes.ERR_EOF), 5},
+		{"missing-closers-with-nul-soh", []byte(`{"users":[{"id":1},{"dd":2}` + "\x00\x01"), -int(nativetypes.ERR_EOF), 28},
+		{"array-value-soh", []byte{'[', '1', ',', 0x01}, -int(nativetypes.ERR_INVALID_CHAR), 4},
+		{"array-value-x", []byte{'[', '1', ',', 'x'}, -int(nativetypes.ERR_INVALID_CHAR), 4},
+		{"root-nul", []byte{0x00}, -int(nativetypes.ERR_EOF), 1},
+		{"complete-root-before-nul", []byte{'[', ']', 0x00}, 0, 2},
+		{"raw-control-in-string", []byte{'"', 'a', 0x00, '"'}, 0, 4},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			start, end := Skip(tc.in)
+			if start != tc.start || end != tc.end {
+				t.Fatalf("Skip(% x) = (%d,%d), want (%d,%d)", tc.in, start, end, tc.start, tc.end)
+			}
+		})
+	}
+}
+
+func TestSkipLiteralMismatchCursorMatchesSonic(t *testing.T) {
+	cases := []struct {
+		name string
+		in   []byte
+		end  int
+	}{
+		{"true-at-1", []byte("tXue"), 1},
+		{"true-at-2", []byte("trXe"), 2},
+		{"true-at-3", []byte("truX"), 3},
+		{"false-at-1", []byte("fXlse"), 1},
+		{"false-at-4", []byte("falsX"), 4},
+		{"null-at-1", []byte("nXll"), 1},
+		{"null-at-2", []byte("nuXl"), 2},
+		{"null-at-3", []byte("nulX"), 3},
+		{"null-invalid-utf8-at-1", []byte{'n', 0xf5, 'l', 'l'}, 1},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			start, end := Skip(tc.in)
+			if start != -int(nativetypes.ERR_INVALID_CHAR) || end != tc.end {
+				t.Fatalf("Skip(%q) = (%d,%d), want (%d,%d)", tc.in, start, end, -int(nativetypes.ERR_INVALID_CHAR), tc.end)
+			}
+		})
+	}
+}
+
+func TestSkipIncompleteReturnsEOF(t *testing.T) {
+	cases := []struct {
+		in      []byte
+		wantEnd int
+	}{
+		{[]byte(``), 4},
+		{[]byte(`   `), 4},
+		{[]byte(`{"a":`), 9},
+		{[]byte(`[1, 2`), 9},
+		{[]byte(`"unclosed`), 9},
+		{[]byte(`"truncated\`), 11},
+	}
+	for _, tc := range cases {
+		start, end := Skip(tc.in)
+		if start != -int(nativetypes.ERR_EOF) || end != tc.wantEnd {
+			t.Fatalf("Skip(%q) = (%d,%d), want (%d,%d)", tc.in, start, end, -int(nativetypes.ERR_EOF), tc.wantEnd)
 		}
+	}
+}
+
+func TestSkipRejectsContainersAtSonicRecursionBoundary(t *testing.T) {
+	nestedArray := func(depth int) []byte {
+		return []byte(strings.Repeat("[", depth) + "0" + strings.Repeat("]", depth))
+	}
+	nestedObject := func(depth int) []byte {
+		return []byte(strings.Repeat(`{"a":`, depth) + "0" + strings.Repeat("}", depth))
+	}
+	nestedAlternating := func(depth int, rootObject bool) []byte {
+		var opens, closes strings.Builder
+		for i := 0; i < depth; i++ {
+			if (i%2 == 0) == rootObject {
+				opens.WriteString(`{"a":`)
+				closes.WriteByte('}')
+			} else {
+				opens.WriteByte('[')
+				closes.WriteByte(']')
+			}
+		}
+		closeText := closes.String()
+		var reversed strings.Builder
+		for i := len(closeText) - 1; i >= 0; i-- {
+			reversed.WriteByte(closeText[i])
+		}
+		return []byte(opens.String() + "0" + reversed.String())
+	}
+
+	for _, tt := range []struct {
+		name                 string
+		build                func(int) []byte
+		maxSuccess, firstBad int
+		badCursor            int
+	}{
+		{name: "arrays", build: nestedArray, maxSuccess: 4096, firstBad: 4097, badCursor: 4097},
+		{name: "objects", build: nestedObject, maxSuccess: 4095, firstBad: 4096, badCursor: 20479},
+		{name: "alternating array root", build: func(depth int) []byte { return nestedAlternating(depth, false) }, maxSuccess: 4095, firstBad: 4096, badCursor: 12287},
+		{name: "alternating object root", build: func(depth int) []byte { return nestedAlternating(depth, true) }, maxSuccess: 4096, firstBad: 4097, badCursor: 12289},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			in := tt.build(tt.maxSuccess)
+			if start, end := Skip(in); start != 0 || end != len(in) {
+				t.Fatalf("Skip(max success depth %d) = (%d,%d), want (0,%d)", tt.maxSuccess, start, end, len(in))
+			}
+
+			if start, end := Skip(tt.build(tt.firstBad)); start != -int(nativetypes.ERR_RECURSE_EXCEED_MAX) || end != tt.badCursor {
+				t.Fatalf("Skip(first failing depth %d) = (%d,%d), want (%d,%d)", tt.firstBad, start, end, -int(nativetypes.ERR_RECURSE_EXCEED_MAX), tt.badCursor)
+			}
+		})
+	}
+}
+
+func TestSkipRecursionLimitOverridesEOFAtObjectValue(t *testing.T) {
+	in := []byte(strings.Repeat(`{"a":`, 4096))
+	start, end := Skip(in)
+	if start != -int(nativetypes.ERR_RECURSE_EXCEED_MAX) || end != 20479 {
+		t.Fatalf("Skip(4096 nested object prefixes) = (%d,%d), want (%d,%d)", start, end, -int(nativetypes.ERR_RECURSE_EXCEED_MAX), 20479)
 	}
 }
 
