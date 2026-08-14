@@ -27,7 +27,13 @@ var ErrJSONv2ExperimentDisabled = errors.New("stdjsonv2: GOEXPERIMENT=jsonv2 is 
 
 // froze returns the jsonv2-backed API. It is the build-specific
 // implementation of (Config).Froze declared in api.go.
-func froze(cfg Config) API { return &jsonv2API{cfg: cfg} }
+func froze(cfg Config) API {
+	return &jsonv2API{
+		cfg:           cfg,
+		marshalOpts:   buildMarshalOptions(cfg),
+		unmarshalOpts: buildUnmarshalOptions(cfg),
+	}
+}
 
 // doGet is the build-specific implementation of Get/GetFromString/
 // GetCopyFromString declared in api.go. It delegates to GetWithOptions.
@@ -50,10 +56,14 @@ func GetWithOptions(src []byte, opts ast.SearchOptions, path ...interface{}) (as
 }
 
 // jsonv2API is the jsonv2-backed implementation of API.
-type jsonv2API struct{ cfg Config }
+type jsonv2API struct {
+	cfg           Config
+	marshalOpts   []jsonv2.Options
+	unmarshalOpts []jsonv2.Options
+}
 
 func (a *jsonv2API) Marshal(v interface{}) ([]byte, error) {
-	return jsonv2.Marshal(v, a.marshalOptions()...)
+	return jsonv2.Marshal(v, a.marshalOpts...)
 }
 
 func (a *jsonv2API) MarshalToString(v interface{}) (string, error) {
@@ -70,7 +80,7 @@ func (a *jsonv2API) MarshalIndent(v interface{}, prefix, indent string) ([]byte,
 	// jsontext.WithIndent. MarshalEncode into a jsontext.Encoder would
 	// re-apply the options, so we simply marshal then format through a
 	// jsontext.Value which handles the canonical formatting.
-	b, err := jsonv2.Marshal(v, a.marshalOptions()...)
+	b, err := jsonv2.Marshal(v, a.marshalOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -94,7 +104,7 @@ func (a *jsonv2API) UnmarshalFromString(buf string, val interface{}) error {
 }
 
 func (a *jsonv2API) Unmarshal(data []byte, val interface{}) error {
-	return decodeBytes(data, val, a.cfg)
+	return decodeBytes(data, val, a.cfg, a.unmarshalOpts)
 }
 
 func (a *jsonv2API) Valid(data []byte) bool {
@@ -119,14 +129,14 @@ func (a *jsonv2API) NewDecoder(r io.Reader) Decoder {
 	return &jsonv2Decoder{
 		dec:                   dec,
 		cfg:                   a.cfg,
+		unmarshalOpts:         buildUnmarshalOptions(a.cfg),
 		useNumber:             a.cfg.UseNumber,
 		disallowUnknownFields: a.cfg.DisallowUnknownFields,
 	}
 }
 
-// marshalOptions builds the jsonv2 Options slice for a Marshal call.
-func (a *jsonv2API) marshalOptions() []jsonv2.Options {
-	cfg := a.cfg
+// buildMarshalOptions builds the jsonv2 Options slice for a Marshal call.
+func buildMarshalOptions(cfg Config) []jsonv2.Options {
 	opts := []jsonv2.Options{jsonv2.DefaultOptionsV2()}
 	opts = append(opts, stdjsontext.EscapeForHTML(cfg.EscapeHTML))
 	if cfg.SortMapKeys {
@@ -142,8 +152,20 @@ func (a *jsonv2API) marshalOptions() []jsonv2.Options {
 	return opts
 }
 
+// buildUnmarshalOptions builds the jsonv2 Options slice for an Unmarshal call.
+func buildUnmarshalOptions(cfg Config) []jsonv2.Options {
+	opts := []jsonv2.Options{jsonv2.DefaultOptionsV2()}
+	if cfg.DisallowUnknownFields {
+		opts = append(opts, jsonv2.RejectUnknownMembers(true))
+	}
+	if cfg.CaseSensitive {
+		opts = append(opts, jsonv2.MatchCaseInsensitiveNames(false))
+	}
+	return opts
+}
+
 // encodeStreamOptions builds the jsontext Options slice for a streaming
-// Encoder. It mirrors marshalOptions but only includes the encode-side
+// Encoder. It mirrors buildMarshalOptions but only includes the encode-side
 // options (no unmarshal options).
 func (a *jsonv2API) encodeStreamOptions() []stdjsontext.Options {
 	cfg := a.cfg
@@ -174,7 +196,7 @@ func (a *jsonv2API) encodeStreamOptions() []stdjsontext.Options {
 // (jsonv2 v2 semantics decode numbers as float64 by default and do not
 // expose a UseNumber knob on the v2 API). Otherwise we use jsonv2.Unmarshal
 // to honor the v2-specific options (RejectUnknownMembers, etc.).
-func decodeBytes(data []byte, val interface{}, cfg Config) error {
+func decodeBytes(data []byte, val interface{}, cfg Config, opts []jsonv2.Options) error {
 	if cfg.UseNumber || cfg.UseInt64 {
 		dec := json.NewDecoder(bytes.NewReader(data))
 		dec.UseNumber()
@@ -191,13 +213,6 @@ func decodeBytes(data []byte, val interface{}, cfg Config) error {
 			jsonconv.ConvertNumbersToInt64(val)
 		}
 		return nil
-	}
-	opts := []jsonv2.Options{jsonv2.DefaultOptionsV2()}
-	if cfg.DisallowUnknownFields {
-		opts = append(opts, jsonv2.RejectUnknownMembers(true))
-	}
-	if cfg.CaseSensitive {
-		opts = append(opts, jsonv2.MatchCaseInsensitiveNames(false))
 	}
 	return jsonv2.Unmarshal(data, val, opts...)
 }
@@ -312,6 +327,7 @@ func (e *jsonv2Encoder) reconfigure() {
 type jsonv2Decoder struct {
 	dec                   *stdjsontext.Decoder
 	cfg                   Config
+	unmarshalOpts         []jsonv2.Options
 	useNumber             bool
 	disallowUnknownFields bool
 }
@@ -324,7 +340,7 @@ func (d *jsonv2Decoder) Decode(v interface{}) error {
 	if err != nil {
 		return err
 	}
-	return decodeBytes([]byte(val), v, d.cfg)
+	return decodeBytes([]byte(val), v, d.cfg, d.unmarshalOpts)
 }
 
 func (d *jsonv2Decoder) Buffered() io.Reader {
@@ -339,6 +355,7 @@ func (d *jsonv2Decoder) Buffered() io.Reader {
 func (d *jsonv2Decoder) DisallowUnknownFields() {
 	d.disallowUnknownFields = true
 	d.cfg.DisallowUnknownFields = true
+	d.unmarshalOpts = buildUnmarshalOptions(d.cfg)
 }
 
 func (d *jsonv2Decoder) More() bool {

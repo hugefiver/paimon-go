@@ -8,8 +8,11 @@ package stdjsonv2
 import (
 	"bytes"
 	"encoding/json"
+	stdjsontext "encoding/json/jsontext"
+	jsonv2 "encoding/json/v2"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/bytedance/sonic/ast"
@@ -24,6 +27,244 @@ var (
 	_ Encoder = NewEncoder(&bytes.Buffer{})
 	_ Decoder = NewDecoder(strings.NewReader("{}"))
 )
+
+type jsonv2OptionsState struct {
+	len   int
+	cap   int
+	first *jsonv2.Options
+}
+
+func snapshotJSONv2Options(t *testing.T, name string, opts []jsonv2.Options) jsonv2OptionsState {
+	t.Helper()
+	if len(opts) == 0 {
+		t.Fatalf("%s options are empty", name)
+	}
+	return jsonv2OptionsState{len: len(opts), cap: cap(opts), first: &opts[0]}
+}
+
+func assertJSONv2OptionsStable(t *testing.T, name string, got, want jsonv2OptionsState) {
+	t.Helper()
+	if got != want {
+		t.Fatalf("%s options changed: got %+v, want %+v", name, got, want)
+	}
+}
+
+func assertJSONv2Option[T comparable](t *testing.T, opts jsonv2.Options, name string, setter func(T) jsonv2.Options, want T) {
+	t.Helper()
+	got, ok := jsonv2.GetOption(opts, setter)
+	if !ok || got != want {
+		t.Fatalf("%s = %v (present: %t), want %v", name, got, ok, want)
+	}
+}
+
+func TestJSONv2FrozenOptionsAreCachedAndImmutable(t *testing.T) {
+	type target struct {
+		Known string `json:"known"`
+	}
+
+	t.Run("cached options remain stable", func(t *testing.T) {
+		tests := []struct {
+			name string
+			api  *jsonv2API
+		}{
+			{name: "default", api: ConfigDefault.(*jsonv2API)},
+			{name: "custom", api: Config{
+				EscapeHTML:            true,
+				SortMapKeys:           true,
+				NoNullSliceOrMap:      true,
+				DisallowUnknownFields: true,
+				CaseSensitive:         true,
+			}.Froze().(*jsonv2API)},
+		}
+
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				marshalBefore := snapshotJSONv2Options(t, "marshal", tt.api.marshalOpts)
+				unmarshalBefore := snapshotJSONv2Options(t, "unmarshal", tt.api.unmarshalOpts)
+
+				for range 2 {
+					if _, err := tt.api.Marshal(map[string]int{"value": 1}); err != nil {
+						t.Fatalf("Marshal error = %v", err)
+					}
+					var out target
+					if err := tt.api.Unmarshal([]byte(`{"known":"value"}`), &out); err != nil {
+						t.Fatalf("Unmarshal error = %v", err)
+					}
+					if out.Known != "value" {
+						t.Fatalf("Unmarshal result = %+v", out)
+					}
+				}
+
+				assertJSONv2OptionsStable(t, "marshal", snapshotJSONv2Options(t, "marshal", tt.api.marshalOpts), marshalBefore)
+				assertJSONv2OptionsStable(t, "unmarshal", snapshotJSONv2Options(t, "unmarshal", tt.api.unmarshalOpts), unmarshalBefore)
+			})
+		}
+	})
+
+	t.Run("concurrent API reuse", func(t *testing.T) {
+		api := ConfigDefault.(*jsonv2API)
+		const goroutines = 32
+		const iterations = 32
+		errs := make(chan error, goroutines)
+		var wg sync.WaitGroup
+		for range goroutines {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for range iterations {
+					encoded, err := api.Marshal(map[string]int{"value": 1})
+					if err != nil {
+						errs <- err
+						return
+					}
+					if string(encoded) != `{"value":1}` {
+						errs <- errors.New("Marshal produced unstable output")
+						return
+					}
+					var out target
+					if err := api.Unmarshal([]byte(`{"known":"value"}`), &out); err != nil {
+						errs <- err
+						return
+					}
+					if out.Known != "value" {
+						errs <- errors.New("Unmarshal produced unstable output")
+						return
+					}
+				}
+			}()
+		}
+		wg.Wait()
+		close(errs)
+		for err := range errs {
+			t.Fatal(err)
+		}
+	})
+
+	t.Run("decoder options are isolated from API", func(t *testing.T) {
+		api := Config{}.Froze().(*jsonv2API)
+		unmarshalBefore := snapshotJSONv2Options(t, "API unmarshal", api.unmarshalOpts)
+		input := `{"known":"value","unknown":"ignored"}`
+
+		decoder1 := api.NewDecoder(strings.NewReader(input))
+		decoder1.DisallowUnknownFields()
+		if err := decoder1.Decode(&target{}); err == nil {
+			t.Fatal("decoder with DisallowUnknownFields accepted unknown field")
+		}
+
+		decoder2 := api.NewDecoder(strings.NewReader(input))
+		var fromDecoder target
+		if err := decoder2.Decode(&fromDecoder); err != nil {
+			t.Fatalf("independent decoder rejected unknown field: %v", err)
+		}
+		if fromDecoder.Known != "value" {
+			t.Fatalf("independent decoder result = %+v", fromDecoder)
+		}
+
+		var fromAPI target
+		if err := api.Unmarshal([]byte(input), &fromAPI); err != nil {
+			t.Fatalf("API Unmarshal rejected unknown field: %v", err)
+		}
+		if fromAPI.Known != "value" {
+			t.Fatalf("API Unmarshal result = %+v", fromAPI)
+		}
+		assertJSONv2OptionsStable(t, "API unmarshal", snapshotJSONv2Options(t, "API unmarshal", api.unmarshalOpts), unmarshalBefore)
+	})
+}
+
+func TestJSONv2CachedCustomOptionsHonorConfiguration(t *testing.T) {
+	type target struct {
+		Known string `json:"known"`
+	}
+	type inlinedField struct {
+		Lower string `json:"field"`
+	}
+	type caseSensitiveMarshalTarget struct {
+		inlinedField `json:",inline"`
+		Upper        string `json:"FIELD"`
+	}
+	type nilCollections struct {
+		Slice []string       `json:"slice"`
+		Map   map[string]int `json:"map"`
+	}
+
+	api := Config{
+		EscapeHTML:            true,
+		SortMapKeys:           true,
+		NoNullSliceOrMap:      true,
+		DisallowUnknownFields: true,
+		CaseSensitive:         true,
+	}.Froze().(*jsonv2API)
+
+	// Keep the cached option slices separate so that no-op v2 defaults (nil
+	// collection formatting and strict field matching) still prove their
+	// Config branches add the intended option to the relevant builder.
+	if got, want := len(api.marshalOpts), 6; got != want {
+		t.Fatalf("marshal option count = %d, want %d", got, want)
+	}
+	if got, want := len(api.unmarshalOpts), 3; got != want {
+		t.Fatalf("unmarshal option count = %d, want %d", got, want)
+	}
+
+	marshalOpts := jsonv2.JoinOptions(api.marshalOpts...)
+	unmarshalOpts := jsonv2.JoinOptions(api.unmarshalOpts...)
+	assertJSONv2Option(t, marshalOpts, "EscapeForHTML", stdjsontext.EscapeForHTML, true)
+	assertJSONv2Option(t, marshalOpts, "Deterministic", jsonv2.Deterministic, true)
+	assertJSONv2Option(t, marshalOpts, "FormatNilSliceAsNull", jsonv2.FormatNilSliceAsNull, false)
+	assertJSONv2Option(t, marshalOpts, "FormatNilMapAsNull", jsonv2.FormatNilMapAsNull, false)
+	assertJSONv2Option(t, marshalOpts, "MatchCaseInsensitiveNames", jsonv2.MatchCaseInsensitiveNames, false)
+	assertJSONv2Option(t, unmarshalOpts, "RejectUnknownMembers", jsonv2.RejectUnknownMembers, true)
+	assertJSONv2Option(t, unmarshalOpts, "MatchCaseInsensitiveNames", jsonv2.MatchCaseInsensitiveNames, false)
+
+	encoded, err := api.Marshal(map[string]string{
+		"z": "<>&",
+		"a": "first",
+	})
+	if err != nil {
+		t.Fatalf("Marshal escaped map error = %v", err)
+	}
+	if got, want := string(encoded), `{"a":"first","z":"\u003c\u003e\u0026"}`; got != want {
+		t.Fatalf("Marshal escaped deterministic map = %s, want %s", got, want)
+	}
+
+	encoded, err = api.Marshal(nilCollections{})
+	if err != nil {
+		t.Fatalf("Marshal nil collections error = %v", err)
+	}
+	if got, want := string(encoded), `{"slice":[],"map":{}}`; got != want {
+		t.Fatalf("Marshal nil collections = %s, want %s", got, want)
+	}
+
+	encoded, err = api.Marshal(caseSensitiveMarshalTarget{
+		inlinedField: inlinedField{Lower: "lower"},
+		Upper:        "upper",
+	})
+	if err != nil {
+		t.Fatalf("Marshal case-sensitive fields error = %v", err)
+	}
+	if got, want := string(encoded), `{"field":"lower","FIELD":"upper"}`; got != want {
+		t.Fatalf("Marshal case-sensitive fields = %s, want %s", got, want)
+	}
+
+	var known target
+	if err := api.Unmarshal([]byte(`{"known":"value"}`), &known); err != nil {
+		t.Fatalf("Unmarshal exact-case field error = %v", err)
+	}
+	if got, want := known.Known, "value"; got != want {
+		t.Fatalf("Unmarshal exact-case field = %q, want %q", got, want)
+	}
+
+	var mismatchedCase target
+	if err := api.Unmarshal([]byte(`{"KNOWN":"value"}`), &mismatchedCase); err == nil {
+		t.Fatal("Unmarshal accepted mismatched-case field")
+	}
+	if mismatchedCase.Known != "" {
+		t.Fatalf("Unmarshal populated mismatched-case field: %+v", mismatchedCase)
+	}
+
+	if err := api.Unmarshal([]byte(`{"known":"value","unknown":"ignored"}`), &target{}); err == nil {
+		t.Fatal("Unmarshal accepted unknown field")
+	}
+}
 
 func TestJSONv2MarshalRoundTrip(t *testing.T) {
 	type sample struct {
