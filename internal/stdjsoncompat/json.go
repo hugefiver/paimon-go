@@ -37,31 +37,25 @@ func validateNumberModes(cfg backend.Config) {
 	}
 }
 
-// Marshal serializes v under cfg. EscapeHTML is honored by post-processing
-// the encoding/json output when false (encoding/json escapes HTML by
-// default); SortMapKeys is honored natively by encoding/json.
+// Marshal serializes v under cfg. SortMapKeys is honored natively by
+// encoding/json.
 func Marshal(v interface{}, cfg backend.Config) ([]byte, error) {
-	b, err := json.Marshal(v)
-	if err != nil {
+	if cfg.EscapeHTML {
+		return json.Marshal(v)
+	}
+
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(v); err != nil {
 		return nil, err
 	}
-	if !cfg.EscapeHTML {
-		// encoding/json always HTML-escapes when using Marshal. Undo it
-		// by re-encoding through a buffer with SetEscapeHTML(false).
-		var buf bytes.Buffer
-		enc := json.NewEncoder(&buf)
-		enc.SetEscapeHTML(false)
-		if err := enc.Encode(v); err != nil {
-			return nil, err
-		}
-		// json.Encoder.Encode appends a newline; trim it to match Marshal.
-		out := buf.Bytes()
-		if n := len(out); n > 0 && out[n-1] == '\n' {
-			out = out[:n-1]
-		}
-		return out, nil
+	// json.Encoder.Encode appends a newline; trim it to match Marshal.
+	out := buf.Bytes()
+	if n := len(out); n > 0 && out[n-1] == '\n' {
+		out = out[:n-1]
 	}
-	return b, nil
+	return out, nil
 }
 
 // MarshalIndent is like Marshal but applies a two-space-ish indent.

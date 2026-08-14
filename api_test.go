@@ -17,6 +17,46 @@ type apiSample struct {
 	Count int    `json:"count"`
 }
 
+type rootCountingMarshaler struct {
+	calls int
+}
+
+func (m *rootCountingMarshaler) MarshalJSON() ([]byte, error) {
+	m.calls++
+	return []byte(`{"value":"<tag>"}`), nil
+}
+
+type rootSentinelErrorMarshaler struct {
+	err error
+}
+
+func (m rootSentinelErrorMarshaler) MarshalJSON() ([]byte, error) {
+	return nil, m.err
+}
+
+func TestRootMarshalEncodesOnceWithoutHTMLEscaping(t *testing.T) {
+	value := &rootCountingMarshaler{}
+	encoded, err := Marshal(value)
+	if err != nil {
+		t.Fatalf("Marshal error = %v", err)
+	}
+	if value.calls != 1 {
+		t.Fatalf("MarshalJSON calls = %d, want 1", value.calls)
+	}
+	if !bytes.Contains(encoded, []byte(`<tag>`)) {
+		t.Fatalf("Marshal output = %s, want literal <tag>", encoded)
+	}
+	if len(encoded) > 0 && encoded[len(encoded)-1] == '\n' {
+		t.Fatalf("Marshal output has trailing newline: %q", encoded)
+	}
+
+	wantErr := errors.New("marshal boom")
+	_, err = Marshal(rootSentinelErrorMarshaler{err: wantErr})
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("Marshal error = %v, want errors.Is(_, %v)", err, wantErr)
+	}
+}
+
 func TestRootMarshalUnmarshalAndConfig(t *testing.T) {
 	b, err := Marshal(apiSample{Name: "<x>", Count: 2})
 	if err != nil {
