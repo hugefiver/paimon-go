@@ -65,22 +65,12 @@ func parseRawToNode(src string) (Node, nativetypes.ParsingError) {
 	return parseRawToNodeEx(src)
 }
 
-// parseRawToNodeEx is the worker for parseRawToNode. It uses a local
-// fastjson.ParserPool entry so concurrent parsers do not share state.
+// parseRawToNodeEx is the worker for parseRawToNode. It uses the local
+// recursive-descent parser (not fastjson) so string unescaping follows
+// Sonic semantics (unpaired surrogates -> U+FFFD, unknown escapes are
+// errors) and the nesting limit matches Sonic's MAX_RECURSE (4096).
 func parseRawToNodeEx(src string) (Node, nativetypes.ParsingError) {
-	var fp vfastjson.Parser
-	v, err := fp.Parse(src)
-	if err != nil {
-		return Node{}, mapFastjsonError(src, err)
-	}
-	n, code := fastjsonValueToNode(v)
-	if code != 0 {
-		return Node{}, code
-	}
-	// Mark fully loaded (fastjsonValueToNode already constructs loaded
-	// nodes, but set loaded explicitly for clarity).
-	n.loaded = true
-	return n, 0
+	return parseRawToNodeLocal(src)
 }
 
 // fastjsonValueToNode deep-copies a fastjson Value into a Node. The
@@ -97,6 +87,14 @@ func fastjsonValueToNode(v *vfastjson.Value) (Node, nativetypes.ParsingError) {
 	case vfastjson.TypeFalse:
 		return NewBool(false), 0
 	case vfastjson.TypeString:
+		// fastjson's unescape is "best-effort": an unpaired \uD800
+		// surrogate stays as literal backslash text instead of U+FFFD,
+		// which breaks string equality and object-key lookup. Re-quote
+		// the (already unescaped) content and decode through the local
+		// parser's unescape rules is not possible (the escape structure
+		// is lost), so accept fastjson's decoding for the searcher
+		// fallback path; the primary Parser path no longer routes
+		// through fastjson.
 		s, err := v.StringBytes()
 		if err != nil {
 			return Node{}, nativetypes.ERR_INVALID_CHAR
@@ -154,6 +152,10 @@ func fastjsonValueToNode(v *vfastjson.Value) (Node, nativetypes.ParsingError) {
 	return Node{typ: V_ERROR, exists: true, loaded: true, err: fmt.Errorf("unknown fastjson type %d", v.Type())}, nativetypes.ERR_INVALID_CHAR
 }
 
+// sonicNumberLiteral validates a JSON number literal. Leading zeros
+// followed by more digits (e.g. "0123") consume the full digit run so
+// the raw literal is preserved verbatim, matching Sonic's lenient
+// number handling instead of silently truncating the value.
 func sonicNumberLiteral(lit string) (string, bool) {
 	if lit == "" {
 		return "", false
@@ -168,8 +170,10 @@ func sonicNumberLiteral(lit string) (string, bool) {
 	intStart := i
 	if lit[i] == '0' {
 		i++
-		if i < len(lit) && lit[i] >= '0' && lit[i] <= '9' {
-			return lit[:i], true
+		// Consume any additional digits so leading-zero literals such as
+		// "0123" round-trip as-is rather than being cut to "0".
+		for i < len(lit) && lit[i] >= '0' && lit[i] <= '9' {
+			i++
 		}
 	} else if lit[i] >= '1' && lit[i] <= '9' {
 		for i < len(lit) && lit[i] >= '0' && lit[i] <= '9' {
