@@ -76,18 +76,18 @@ func (e ParsingError) Message() string {
 }
 
 // ValueType identifies the JSON value category produced by a parser.
-// It mirrors the minimal subset of Sonic's ValueType used in exported
-// signatures.
-type ValueType int
+// It mirrors Sonic v1.15.2: ValueType is an int64 alias and the V_*
+// constants start at 1 (V_EOF) through V_INTEGER = 9.
+type ValueType = int64
 
 const (
-	V_EOF ValueType = iota
-	V_NULL
-	V_TRUE
-	V_FALSE
-	V_ARRAY
-	V_OBJECT
-	V_STRING
-	V_DOUBLE
-	V_INTEGER
+	V_EOF     ValueType = 1
+	V_NULL    ValueType = 2
+	V_TRUE    ValueType = 3
+	V_FALSE   ValueType = 4
+	V_ARRAY   ValueType = 5
+	V_OBJECT  ValueType = 6
+	V_STRING  ValueType = 7
+	V_DOUBLE  ValueType = 8
+	V_INTEGER ValueType = 9
 )

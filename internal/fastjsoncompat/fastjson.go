@@ -466,8 +466,12 @@ func findArrayValue(data []byte, start, end int, idx int) (int, int, scanStatus)
 	return 0, 0, scanInvalid
 }
 
+// maxScanDepth mirrors Sonic's MAX_RECURSE limit (4096); fastjson's
+// MaxDepth of 300 would reject valid deep documents Sonic accepts.
+const maxScanDepth = 4096
+
 func scanValueEnd(data []byte, start int, depth int) (int, bool) {
-	if depth > vfastjson.MaxDepth || start >= len(data) {
+	if depth > maxScanDepth || start >= len(data) {
 		return 0, false
 	}
 	switch data[start] {
