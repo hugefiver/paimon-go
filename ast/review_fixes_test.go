@@ -45,6 +45,50 @@ func TestLeadingZeroNumberLiteralsPreserved(t *testing.T) {
 	if got != "0123" {
 		t.Fatalf("leading-zero literal = %q; want 0123", got)
 	}
+
+	rawNode := NewRaw("0123")
+	got, err = rawNode.Raw()
+	if err != nil {
+		t.Fatalf("NewRaw(0123).Raw() error = %v", err)
+	}
+	if got != "0123" {
+		t.Fatalf("NewRaw(0123).Raw() = %q; want 0123", got)
+	}
+
+	s := NewSearcher(`{"a":0123}`)
+	child, err := s.GetByPath("a")
+	if err != nil {
+		t.Fatalf("Searcher.GetByPath leading-zero error = %v", err)
+	}
+	got, err = child.Raw()
+	if err != nil {
+		t.Fatalf("Searcher child Raw() error = %v", err)
+	}
+	if got != "0123" {
+		t.Fatalf("Searcher leading-zero Raw() = %q; want 0123", got)
+	}
+
+	sNoValidate := NewSearcher(`{"a":0123}`)
+	sNoValidate.ValidateJSON = false
+	child, err = sNoValidate.GetByPath("a")
+	if err != nil {
+		t.Fatalf("Searcher(no validate).GetByPath leading-zero error = %v", err)
+	}
+	got, err = child.Raw()
+	if err != nil {
+		t.Fatalf("Searcher(no validate) child Raw() error = %v", err)
+	}
+	if got != "0123" {
+		t.Fatalf("Searcher(no validate) leading-zero Raw() = %q; want 0123", got)
+	}
+
+	var sb strings.Builder
+	if err := Preorder(`[0123]`, &collectVisitor{sb: &sb}, nil); err != nil {
+		t.Fatalf("Preorder([0123]) error = %v", err)
+	}
+	if !strings.Contains(sb.String(), "int:0123;") {
+		t.Fatalf("Preorder([0123]) output = %q; want int callback with raw 0123", sb.String())
+	}
 }
 
 // An unpaired \uD800 surrogate decodes to U+FFFD (Sonic semantics),
@@ -243,6 +287,19 @@ func TestDeepNestingUpTo4096Accepted(t *testing.T) {
 	if v, err := cur.Index(0).Int64(); err != nil || v != 0 {
 		t.Fatalf("deep value = %v, %v; want 0, nil", v, err)
 	}
+
+	s := NewSearcher(`{"a":` + deep + `}`)
+	child, err := s.GetByPath("a")
+	if err != nil {
+		t.Fatalf("Searcher.GetByPath(400-deep) error = %v", err)
+	}
+	got, err := child.Raw()
+	if err != nil {
+		t.Fatalf("deep searcher Raw() error = %v", err)
+	}
+	if got != deep {
+		t.Fatalf("deep searcher raw length = %d; want %d", len(got), len(deep))
+	}
 }
 
 // ForEach on a scalar invokes the callback once with Index -1 (Sonic).
@@ -322,10 +379,15 @@ type collectVisitor struct {
 	sb *strings.Builder
 }
 
-func (v *collectVisitor) OnNull() error                       { v.sb.WriteString("null;"); return nil }
-func (v *collectVisitor) OnBool(b bool) error                 { v.sb.WriteString("bool;"); return nil }
-func (v *collectVisitor) OnString(s string) error             { v.sb.WriteString("string:" + s + ";"); return nil }
-func (v *collectVisitor) OnInt64(i int64, n json.Number) error { v.sb.WriteString("int;"); return nil }
+func (v *collectVisitor) OnNull() error           { v.sb.WriteString("null;"); return nil }
+func (v *collectVisitor) OnBool(b bool) error     { v.sb.WriteString("bool;"); return nil }
+func (v *collectVisitor) OnString(s string) error { v.sb.WriteString("string:" + s + ";"); return nil }
+func (v *collectVisitor) OnInt64(i int64, n json.Number) error {
+	v.sb.WriteString("int:")
+	v.sb.WriteString(n.String())
+	v.sb.WriteString(";")
+	return nil
+}
 func (v *collectVisitor) OnFloat64(f float64, n json.Number) error {
 	v.sb.WriteString("float:")
 	v.sb.WriteString(n.String())

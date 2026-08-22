@@ -210,7 +210,8 @@ func (p *preorderParser) parseNull(visitor Visitor) error {
 
 func (p *preorderParser) parseNumber(visitor Visitor) error {
 	start := p.pos
-	// Scan a JSON number per RFC 8259 grammar.
+	// Scan a Sonic-compatible JSON number. Sonic preserves leading-zero
+	// digit runs verbatim instead of truncating after the first zero.
 	s := p.src
 	if p.pos < len(s) && s[p.pos] == '-' {
 		p.pos++
@@ -220,6 +221,9 @@ func (p *preorderParser) parseNumber(visitor Visitor) error {
 	}
 	if s[p.pos] == '0' {
 		p.pos++
+		for p.pos < len(s) && s[p.pos] >= '0' && s[p.pos] <= '9' {
+			p.pos++
+		}
 	} else {
 		for p.pos < len(s) && s[p.pos] >= '0' && s[p.pos] <= '9' {
 			p.pos++

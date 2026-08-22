@@ -82,9 +82,8 @@ func Get(data []byte, opts ast.SearchOptions, path ...interface{}) (ast.Node, er
 		return getStdJSON(data, opts, path...)
 	}
 	if opts.ValidateJSON {
-		var p vfastjson.Parser
-		if _, err := p.ParseBytes(data); err != nil {
-			return ast.Node{}, mapFastjsonError(string(data), err)
+		if _, code := ast.NewParser(string(data)).Parse(); code != 0 {
+			return ast.Node{}, code
 		}
 	}
 	if len(path) > 0 {
@@ -594,6 +593,9 @@ func scanNumberEnd(data []byte, start int) (int, bool) {
 	}
 	if data[i] == '0' {
 		i++
+		for i < len(data) && data[i] >= '0' && data[i] <= '9' {
+			i++
+		}
 	} else if data[i] >= '1' && data[i] <= '9' {
 		for i < len(data) && data[i] >= '0' && data[i] <= '9' {
 			i++

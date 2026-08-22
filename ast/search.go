@@ -39,8 +39,8 @@ func (s *Searcher) getByPath(path []interface{}, copyReturn bool) (Node, error) 
 		return Node{}, ErrNotExist
 	}
 	if s.ValidateJSON {
-		if err := vfastjson.Validate(s.src); err != nil {
-			return Node{}, mapFastjsonError(s.src, err)
+		if _, code := parseRawToNodeLocal(s.src); code != 0 {
+			return Node{}, code
 		}
 	}
 	if len(path) == 0 {
@@ -432,6 +432,9 @@ func scanNumberEndString(src string, start int) (int, bool) {
 	}
 	if src[i] == '0' {
 		i++
+		for i < len(src) && src[i] >= '0' && src[i] <= '9' {
+			i++
+		}
 	} else if src[i] >= '1' && src[i] <= '9' {
 		for i < len(src) && src[i] >= '0' && src[i] <= '9' {
 			i++
