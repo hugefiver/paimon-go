@@ -10,9 +10,10 @@ import (
 	vfastjson "github.com/valyala/fastjson"
 )
 
-// NewSearcher builds a Searcher for the given JSON source.
+// NewSearcher builds a Searcher for the given JSON source. ValidateJSON
+// defaults to true, matching Sonic v1.15.2.
 func NewSearcher(str string) *Searcher {
-	return &Searcher{SearchOptions: SearchOptions{}, src: str}
+	return &Searcher{SearchOptions: SearchOptions{ValidateJSON: true}, src: str}
 }
 
 // GetByPath parses the JSON source enough to resolve path and returns
@@ -27,7 +28,9 @@ func (s *Searcher) GetByPath(path ...interface{}) (Node, error) {
 
 // GetByPathCopy is GetByPath with CopyReturn semantics. The returned
 // node is always safe to retain beyond the next call to the searcher.
+// Like Sonic, this persists CopyReturn=true on the searcher.
 func (s *Searcher) GetByPathCopy(path ...interface{}) (Node, error) {
+	s.CopyReturn = true
 	return s.getByPath(path, true)
 }
 
@@ -57,63 +60,52 @@ func (s *Searcher) getByPath(path []interface{}, copyReturn bool) (Node, error) 
 			return Node{}, SyntaxError{Src: s.src, Msg: "invalid JSON value", Code: nativetypes.ERR_INVALID_CHAR}
 		}
 	}
-	var fp vfastjson.Parser
-	v, err := fp.Parse(s.src)
-	if err != nil {
-		return Node{}, mapFastjsonError(s.src, err)
+	// Local-parser fallback: parse the whole document into an owning
+	// Node tree, then walk the path. This avoids fastjson's
+	// best-effort string unescaping (unpaired surrogates stay literal)
+	// and its MaxDepth=300 nesting limit.
+	root, code := parseRawToNodeLocal(s.src)
+	if code != 0 {
+		return Node{}, code
 	}
-	cur := v
+	cur := &root
 	for _, step := range path {
+		if cur == nil || !cur.exists {
+			return Node{}, ErrNotExist
+		}
 		switch x := step.(type) {
 		case string:
-			o, err := cur.Object()
-			if err != nil {
-				return Node{}, ErrNotExist
-			}
-			next := o.Get(x)
-			if next == nil {
+			next := cur.Get(x)
+			if !next.Exists() {
 				return Node{}, ErrNotExist
 			}
 			cur = next
 		case int:
-			arr, err := cur.Array()
-			if err != nil {
+			next := cur.Index(x)
+			if !next.Exists() {
 				return Node{}, ErrNotExist
 			}
-			if x < 0 || x >= len(arr) {
-				return Node{}, ErrNotExist
-			}
-			cur = arr[x]
+			cur = next
 		case int64:
 			idx, ok := intFromInt64(x)
 			if !ok {
 				return Node{}, ErrNotExist
 			}
-			arr, err := cur.Array()
-			if err != nil {
+			next := cur.Index(idx)
+			if !next.Exists() {
 				return Node{}, ErrNotExist
 			}
-			if idx < 0 || idx >= len(arr) {
-				return Node{}, ErrNotExist
-			}
-			cur = arr[idx]
+			cur = next
 		case json.Number:
 			if idx, perr := strconv.Atoi(string(x)); perr == nil {
-				arr, err := cur.Array()
-				if err != nil {
+				next := cur.Index(idx)
+				if !next.Exists() {
 					return Node{}, ErrNotExist
 				}
-				if idx < 0 || idx >= len(arr) {
-					return Node{}, ErrNotExist
-				}
-				cur = arr[idx]
+				cur = next
 			} else {
-				o, err := cur.Object()
-				if err != nil {
-					return Node{}, ErrNotExist
-				}
-				next := o.Get(string(x))
-				if next == nil {
+				next := cur.Get(string(x))
+				if !next.Exists() {
 					return Node{}, ErrNotExist
 				}
 				cur = next
@@ -122,12 +114,7 @@ func (s *Searcher) getByPath(path []interface{}, copyReturn bool) (Node, error) 
 			return Node{}, fmt.Errorf("%w: unsupported path element type %T", ErrUnsupportType, step)
 		}
 	}
-	n, code := fastjsonValueToNode(cur)
-	if code != 0 {
-		return Node{}, code
-	}
-	_ = copyReturn // fastjsonValueToNode always produces an owning Node.
-	return n, nil
+	return *cur, nil
 }
 
 func firstValueRaw(src string) (string, nativetypes.ParsingError) {
@@ -335,8 +322,12 @@ func findArrayValueStartString(src string, start int, idx int) (int, rawPathStat
 	return 0, rawPathInvalid
 }
 
+// maxScanDepth mirrors Sonic's MAX_RECURSE limit (4096); fastjson's
+// MaxDepth of 300 would reject valid deep documents Sonic accepts.
+const maxScanDepth = 4096
+
 func scanValueEndString(src string, start int, depth int) (int, bool) {
-	if depth > vfastjson.MaxDepth || start >= len(src) {
+	if depth > maxScanDepth || start >= len(src) {
 		return 0, false
 	}
 	switch src[start] {
@@ -608,18 +599,24 @@ func LoadsUseNumber(src string) (int, interface{}, error) {
 }
 
 func loadsImpl(src string, useNumber bool) (int, interface{}, error) {
-	n, code := parseRawToNodeEx(src)
+	// Parse with the local parser and report the value-end position
+	// like Sonic's Parser.Pos() (the cursor after the parsed value), not
+	// len(src).
+	p := &localParser{src: src}
+	p.skipSpace()
+	if p.atEnd() {
+		return 0, nil, nativetypes.ERR_EOF
+	}
+	n, code := p.parseValue(0)
 	if code != 0 {
 		return 0, nil, code
 	}
+	pos := p.pos
 	v, err := n.interfaceWith(useNumber, false)
 	if err != nil {
 		return 0, nil, err
 	}
-	// This implementation parses the whole document eagerly; the end
-	// offset is the length of the source because Validate / Parse reject
-	// trailing bytes.
-	return len(src), v, nil
+	return pos, v, nil
 }
 
 // Compile-time checks that the error types satisfy the error interface.

@@ -101,11 +101,26 @@ func NewBytes(src []byte) Node {
 	return NewString(base64.StdEncoding.EncodeToString(src))
 }
 
-// NewAny builds a Node from an arbitrary Go value. Unsupported values
-// produce a V_NONE node whose err is ErrUnsupportType.
+// NewAny builds a Node wrapping an arbitrary Go value. The node's Type()
+// reports V_ANY (Sonic semantics). Unsupported values produce a V_ERROR
+// node whose err is ErrUnsupportType.
 func NewAny(v interface{}) Node {
-	n, _ := nodeFromInterface(v)
-	return n
+	if v == nil {
+		return NewNull()
+	}
+	if x, ok := v.(Node); ok {
+		return x
+	}
+	// Wrap as a raw node tagged V_ANY; raw keeps the JSON encoding so
+	// serialization and lazy loading keep working.
+	inner, err := nodeFromInterface(v)
+	if err != nil {
+		return Node{typ: V_ERROR, exists: true, loaded: true, err: err}
+	}
+	if raw, rerr := inner.Raw(); rerr == nil {
+		return Node{typ: V_ANY, exists: true, raw: raw}
+	}
+	return inner
 }
 
 // ---------------------------------------------------------------------------
@@ -150,12 +165,12 @@ func (n *Node) Valid() bool {
 // IsRaw reports whether the node is an unloaded raw JSON node.
 func (n Node) IsRaw() bool { return !n.loaded && n.raw != "" }
 
-// Error returns the node's error string. For an absent node it is the
-// ErrNotExist message; for an error node it is the underlying error's
+// Error returns the node's error string. For an absent node it is empty
+// (Sonic semantics); for an error node it is the underlying error's
 // message; otherwise it is empty.
 func (n Node) Error() string {
 	if !n.exists {
-		return ErrNotExist.Error()
+		return ""
 	}
 	if n.err != nil {
 		return n.err.Error()
@@ -188,10 +203,17 @@ func (n *Node) Check() error {
 func (n *Node) Load() error { return n.LoadAll() }
 
 // LoadAll parses the raw JSON of this node and recursively all of its
-// children into fully realized Node values.
+// children into fully realized Node values. An error node propagates
+// its underlying error (Sonic semantics) instead of reporting success.
 func (n *Node) LoadAll() error {
 	if n == nil {
 		return ErrNotExist
+	}
+	if n.typ == V_ERROR {
+		if n.err != nil {
+			return n.err
+		}
+		return n
 	}
 	if !n.IsRaw() {
 		return nil
@@ -212,7 +234,8 @@ func (n *Node) LoadAll() error {
 // ---------------------------------------------------------------------------
 
 // Bool returns the boolean value of the node. Non-strict bool conversion
-// accepts the JSON booleans and the strings "true"/"false".
+// follows Sonic: JSON booleans; numbers (non-zero -> true); the strings
+// "true"/"false"; null -> false.
 func (n *Node) Bool() (bool, error) {
 	if n == nil || !n.exists {
 		return false, ErrNotExist
@@ -225,6 +248,14 @@ func (n *Node) Bool() (bool, error) {
 		return true, nil
 	case V_FALSE:
 		return false, nil
+	case V_NULL:
+		return false, nil
+	case V_NUMBER:
+		f, err := strconv.ParseFloat(string(n.num), 64)
+		if err != nil {
+			return false, err
+		}
+		return f != 0, nil
 	case V_STRING:
 		if n.str == "true" {
 			return true, nil
@@ -232,7 +263,11 @@ func (n *Node) Bool() (bool, error) {
 		if n.str == "false" {
 			return false, nil
 		}
-		return false, fmt.Errorf("cannot convert string %q to bool", n.str)
+		b, err := strconv.ParseBool(n.str)
+		if err != nil {
+			return false, fmt.Errorf("cannot convert string %q to bool", n.str)
+		}
+		return b, nil
 	}
 	return false, fmt.Errorf("cannot convert node type %d to bool", n.typ)
 }
@@ -256,7 +291,9 @@ func (n *Node) StrictBool() (bool, error) {
 }
 
 // Int64 returns the node's value as an int64. Non-strict conversion
-// accepts JSON numbers and numeric strings.
+// follows Sonic: JSON numbers (integers, or the integral part when the
+// number parses only as float); numeric strings; true -> 1, false/null
+// -> 0.
 func (n *Node) Int64() (int64, error) {
 	if n == nil || !n.exists {
 		return 0, ErrNotExist
@@ -266,9 +303,27 @@ func (n *Node) Int64() (int64, error) {
 	}
 	switch n.typ {
 	case V_NUMBER:
-		return strconv.ParseInt(string(n.num), 10, 64)
+		if i, err := strconv.ParseInt(string(n.num), 10, 64); err == nil {
+			return i, nil
+		}
+		f, err := strconv.ParseFloat(string(n.num), 64)
+		if err != nil {
+			return 0, err
+		}
+		return int64(f), nil
 	case V_STRING:
-		return strconv.ParseInt(n.str, 10, 64)
+		if i, err := strconv.ParseInt(n.str, 10, 64); err == nil {
+			return i, nil
+		}
+		f, err := strconv.ParseFloat(n.str, 64)
+		if err != nil {
+			return 0, fmt.Errorf("cannot convert string %q to int64", n.str)
+		}
+		return int64(f), nil
+	case V_TRUE:
+		return 1, nil
+	case V_FALSE, V_NULL:
+		return 0, nil
 	}
 	return 0, fmt.Errorf("cannot convert node type %d to int64", n.typ)
 }
@@ -289,7 +344,8 @@ func (n *Node) StrictInt64() (int64, error) {
 }
 
 // Float64 returns the node's value as a float64. Non-strict conversion
-// accepts JSON numbers and numeric strings.
+// follows Sonic: JSON numbers; numeric strings; true -> 1, false/null
+// -> 0.
 func (n *Node) Float64() (float64, error) {
 	if n == nil || !n.exists {
 		return 0, ErrNotExist
@@ -301,7 +357,15 @@ func (n *Node) Float64() (float64, error) {
 	case V_NUMBER:
 		return strconv.ParseFloat(string(n.num), 64)
 	case V_STRING:
-		return strconv.ParseFloat(n.str, 64)
+		f, err := strconv.ParseFloat(n.str, 64)
+		if err != nil {
+			return 0, fmt.Errorf("cannot convert string %q to float64", n.str)
+		}
+		return f, nil
+	case V_TRUE:
+		return 1, nil
+	case V_FALSE, V_NULL:
+		return 0, nil
 	}
 	return 0, fmt.Errorf("cannot convert node type %d to float64", n.typ)
 }
@@ -322,7 +386,8 @@ func (n *Node) StrictFloat64() (float64, error) {
 }
 
 // Number returns the node's value as a json.Number. Non-strict conversion
-// accepts JSON numbers and numeric strings.
+// follows Sonic: JSON numbers; numeric strings; true -> "1", false/null
+// -> "0".
 func (n *Node) Number() (json.Number, error) {
 	if n == nil || !n.exists {
 		return "", ErrNotExist
@@ -334,10 +399,17 @@ func (n *Node) Number() (json.Number, error) {
 	case V_NUMBER:
 		return n.num, nil
 	case V_STRING:
+		if _, err := strconv.ParseInt(n.str, 10, 64); err == nil {
+			return json.Number(n.str), nil
+		}
 		if _, err := strconv.ParseFloat(n.str, 64); err == nil {
 			return json.Number(n.str), nil
 		}
 		return "", fmt.Errorf("cannot convert string %q to number", n.str)
+	case V_TRUE:
+		return json.Number("1"), nil
+	case V_FALSE, V_NULL:
+		return json.Number("0"), nil
 	}
 	return "", fmt.Errorf("cannot convert node type %d to number", n.typ)
 }
@@ -400,7 +472,9 @@ func (n *Node) StrictString() (string, error) {
 // Container accessors
 // ---------------------------------------------------------------------------
 
-// Len returns the number of children of an array or object node.
+// Len returns the number of children of an array or object node, the
+// length of a string node, and 0 for absent/null nodes (Sonic
+// semantics).
 func (n *Node) Len() (int, error) {
 	if n == nil || !n.exists {
 		return 0, ErrNotExist
@@ -415,6 +489,8 @@ func (n *Node) Len() (int, error) {
 		return len(n.obj), nil
 	case V_STRING:
 		return len(n.str), nil
+	case V_NONE, V_NULL:
+		return 0, nil
 	}
 	return 0, fmt.Errorf("node type %d has no length", n.typ)
 }
@@ -423,10 +499,10 @@ func (n *Node) Len() (int, error) {
 // implementation it is the same as Len.
 func (n *Node) Cap() (int, error) { return n.Len() }
 
-// Get returns a pointer to the child of an object node by key, or to
-// the child of an array node when key is the decimal representation of
-// an index. The returned pointer is nil-safe: missing keys yield a
-// pointer to a fresh non-existent node, not nil.
+// Get returns a pointer to the child of an object node by key. It only
+// addresses objects (Sonic semantics); array lookups go through Index.
+// The returned pointer is nil-safe: missing keys yield a pointer to a
+// fresh non-existent node, not nil.
 //
 // The returned pointer aliases the node's internal storage and is
 // invalidated by mutations that reallocate the underlying slice.
@@ -445,16 +521,13 @@ func (n *Node) Get(key string) *Node {
 		}
 		return newMissing()
 	}
-	if n.typ == V_ARRAY {
-		if idx, err := strconv.Atoi(key); err == nil {
-			return n.Index(idx)
-		}
-	}
 	return newMissing()
 }
 
-// Index returns a pointer to the i-th child of an array node. Out-of-range
-// indices yield a pointer to a fresh non-existent node.
+// Index returns a pointer to the i-th child of an array node, or to the
+// value of the i-th pair of an object node (Sonic semantics: both
+// container kinds are indexable). Out-of-range indices yield a pointer
+// to a fresh non-existent node.
 func (n *Node) Index(idx int) *Node {
 	if n == nil || !n.exists {
 		return newMissing()
@@ -462,13 +535,19 @@ func (n *Node) Index(idx int) *Node {
 	if err := n.ensureLoaded(); err != nil {
 		return newErrorNode(err)
 	}
-	if n.typ != V_ARRAY {
-		return newMissing()
+	switch n.typ {
+	case V_ARRAY:
+		if idx < 0 || idx >= len(n.arr) {
+			return newMissing()
+		}
+		return &n.arr[idx]
+	case V_OBJECT:
+		if idx < 0 || idx >= len(n.obj) {
+			return newMissing()
+		}
+		return &n.obj[idx].Value
 	}
-	if idx < 0 || idx >= len(n.arr) {
-		return newMissing()
-	}
-	return &n.arr[idx]
+	return newMissing()
 }
 
 // GetByPath walks the node following a path of string keys and integer
@@ -503,8 +582,9 @@ func (n *Node) GetByPath(path ...interface{}) *Node {
 	return cur
 }
 
-// IndexOrGet returns the child by index when the node is an array, or by
-// key when the node is an object.
+// IndexOrGet returns the child of an object node by key after first
+// trying to match the idx-th pair's key (Sonic semantics: object-only
+// lookup).
 func (n *Node) IndexOrGet(idx int, key string) *Node {
 	if n == nil || !n.exists {
 		return newMissing()
@@ -512,11 +592,16 @@ func (n *Node) IndexOrGet(idx int, key string) *Node {
 	if err := n.ensureLoaded(); err != nil {
 		return newErrorNode(err)
 	}
-	if n.typ == V_ARRAY {
-		return n.Index(idx)
+	if n.typ != V_OBJECT {
+		return newMissing()
 	}
-	if n.typ == V_OBJECT {
-		return n.Get(key)
+	if idx >= 0 && idx < len(n.obj) && n.obj[idx].Key == key {
+		return &n.obj[idx].Value
+	}
+	for i := range n.obj {
+		if n.obj[i].Key == key {
+			return &n.obj[i].Value
+		}
 	}
 	return newMissing()
 }
@@ -569,7 +654,8 @@ func (n *Node) IndexPair(idx int) *Pair {
 // ---------------------------------------------------------------------------
 
 // ForEach iterates over the children of an array or object node, calling
-// fn for each child. Iteration stops if fn returns false.
+// fn for each child. Iteration stops if fn returns false. A scalar node
+// invokes the callback once with Sequence{Index: -1} (Sonic semantics).
 func (n *Node) ForEach(fn Scanner) error {
 	if n == nil || !n.exists {
 		return ErrNotExist
@@ -594,7 +680,8 @@ func (n *Node) ForEach(fn Scanner) error {
 			}
 		}
 	default:
-		return fmt.Errorf("node type %d is not iterable", n.typ)
+		seq := Sequence{Index: -1}
+		fn(seq, n)
 	}
 	return nil
 }
@@ -792,13 +879,22 @@ func (n *Node) MapUseNode() (map[string]Node, error) {
 // Mutation
 // ---------------------------------------------------------------------------
 
-// Add appends a node to an array node.
+// Add appends a node to an array node. An absent (V_NONE) or null node
+// is promoted to an array first, matching Sonic (including zero-value
+// Nodes).
 func (n *Node) Add(child Node) error {
-	if n == nil || !n.exists {
+	if n == nil {
 		return ErrNotExist
 	}
 	if err := n.ensureLoaded(); err != nil {
 		return err
+	}
+	if n.typ == V_NONE || n.typ == V_NULL {
+		*n = NewArray([]Node{child})
+		return nil
+	}
+	if !n.exists {
+		return ErrNotExist
 	}
 	if n.typ != V_ARRAY {
 		return fmt.Errorf("cannot Add to node type %d", n.typ)
@@ -817,13 +913,26 @@ func (n *Node) AddAny(v interface{}) error {
 }
 
 // Set sets the value of an object entry by key. If the key does not exist
-// it is appended; the returned bool reports whether a new key was added.
+// it is appended. The returned bool reports whether the key already
+// existed (Sonic semantics: false for a newly added key, true when an
+// existing entry was overwritten). An absent (V_NONE) or null node is
+// promoted to an object first, matching Sonic.
 func (n *Node) Set(key string, node Node) (bool, error) {
-	if n == nil || !n.exists {
+	if n == nil {
 		return false, ErrNotExist
 	}
 	if err := n.ensureLoaded(); err != nil {
 		return false, err
+	}
+	if node.typ == V_ERROR {
+		return false, node.Check()
+	}
+	if n.typ == V_NONE || n.typ == V_NULL {
+		*n = NewObject([]Pair{NewPair(key, node)})
+		return false, nil
+	}
+	if !n.exists {
+		return false, ErrNotExist
 	}
 	if n.typ != V_OBJECT {
 		return false, fmt.Errorf("cannot Set on node type %d", n.typ)
@@ -831,11 +940,11 @@ func (n *Node) Set(key string, node Node) (bool, error) {
 	for i := range n.obj {
 		if n.obj[i].Key == key {
 			n.obj[i].Value = node
-			return false, nil
+			return true, nil
 		}
 	}
 	n.obj = append(n.obj, Pair{Key: key, Value: node})
-	return true, nil
+	return false, nil
 }
 
 // SetAny is like Set but builds the node from an arbitrary Go value.
@@ -847,51 +956,40 @@ func (n *Node) SetAny(key string, val interface{}) (bool, error) {
 	return n.Set(key, node)
 }
 
-// SetByIndex sets the i-th child of an array node. If idx equals the
-// current length the child is appended. The returned bool reports
-// whether a new slot was added.
+// SetByIndex sets the i-th child of an array or object node (Sonic
+// semantics: the index must address an existing child). The returned
+// bool reports whether an existing child was overwritten. An absent
+// (V_NONE) or null node is promoted to an array when idx == 0, matching
+// Sonic; out-of-range indices return ErrNotExist.
 func (n *Node) SetByIndex(idx int, node Node) (bool, error) {
-	if n == nil || !n.exists {
+	if n == nil {
 		return false, ErrNotExist
 	}
 	if err := n.ensureLoaded(); err != nil {
 		return false, err
 	}
+	if node.typ == V_ERROR {
+		return false, node.Check()
+	}
+	if idx == 0 && (n.typ == V_NONE || n.typ == V_NULL) {
+		*n = NewArray([]Node{node})
+		return false, nil
+	}
+	if !n.exists {
+		return false, ErrNotExist
+	}
 	switch n.typ {
 	case V_ARRAY:
-		if idx < 0 {
-			return false, fmt.Errorf("negative index %d", idx)
+		if idx < 0 || idx >= len(n.arr) {
+			return false, ErrNotExist
 		}
-		if idx < len(n.arr) {
-			n.arr[idx] = node
-			return false, nil
-		}
-		if idx == len(n.arr) {
-			n.arr = append(n.arr, node)
-			return true, nil
-		}
-		// Grow with zeros up to idx-1 then append.
-		for len(n.arr) < idx {
-			n.arr = append(n.arr, NewNull())
-		}
-		n.arr = append(n.arr, node)
+		n.arr[idx] = node
 		return true, nil
 	case V_OBJECT:
-		// Sonic's SetByIndex on an object sets the pair at that position;
-		// the key is left untouched. Out-of-range indices are appended
-		// with an empty key.
-		if idx < len(n.obj) {
-			n.obj[idx].Value = node
-			return false, nil
+		if idx < 0 || idx >= len(n.obj) {
+			return false, ErrNotExist
 		}
-		if idx == len(n.obj) {
-			n.obj = append(n.obj, Pair{Value: node})
-			return true, nil
-		}
-		for len(n.obj) < idx {
-			n.obj = append(n.obj, Pair{})
-		}
-		n.obj = append(n.obj, Pair{Value: node})
+		n.obj[idx].Value = node
 		return true, nil
 	}
 	return false, fmt.Errorf("cannot SetByIndex on node type %d", n.typ)
@@ -955,7 +1053,8 @@ func (n *Node) UnsetByIndex(idx int) (bool, error) {
 	return false, fmt.Errorf("cannot UnsetByIndex on node type %d", n.typ)
 }
 
-// Pop removes the last element of an array node.
+// Pop removes the last element of an array node, or the last pair of an
+// object node (Sonic semantics).
 func (n *Node) Pop() error {
 	if n == nil || !n.exists {
 		return ErrNotExist
@@ -963,14 +1062,21 @@ func (n *Node) Pop() error {
 	if err := n.ensureLoaded(); err != nil {
 		return err
 	}
-	if n.typ != V_ARRAY {
-		return fmt.Errorf("cannot Pop on node type %d", n.typ)
+	switch n.typ {
+	case V_ARRAY:
+		if len(n.arr) == 0 {
+			return fmt.Errorf("pop from empty array")
+		}
+		n.arr = n.arr[:len(n.arr)-1]
+		return nil
+	case V_OBJECT:
+		if len(n.obj) == 0 {
+			return fmt.Errorf("pop from empty object")
+		}
+		n.obj = n.obj[:len(n.obj)-1]
+		return nil
 	}
-	if len(n.arr) == 0 {
-		return fmt.Errorf("pop from empty array")
-	}
-	n.arr = n.arr[:len(n.arr)-1]
-	return nil
+	return fmt.Errorf("cannot Pop on node type %d", n.typ)
 }
 
 // Move moves the element at position src to position dst in an array
@@ -1048,9 +1154,16 @@ func sortKeysNode(n *Node, recurse bool) error {
 
 // Raw returns the compact JSON serialization of the node. For unloaded
 // raw nodes it returns the raw text as given (compacted once on demand).
+// Error nodes propagate their underlying error (Sonic semantics).
 func (n *Node) Raw() (string, error) {
 	if n == nil || !n.exists {
 		return "", ErrNotExist
+	}
+	if n.typ == V_ERROR {
+		if n.err != nil {
+			return "", n.err
+		}
+		return "", n
 	}
 	if n.IsRaw() {
 		return n.raw, nil
@@ -1060,10 +1173,17 @@ func (n *Node) Raw() (string, error) {
 	return string(b), nil
 }
 
-// MarshalJSON implements json.Marshaler.
+// MarshalJSON implements json.Marshaler. Error nodes propagate their
+// underlying error (Sonic semantics).
 func (n *Node) MarshalJSON() ([]byte, error) {
 	if n == nil || !n.exists {
 		return []byte("null"), nil
+	}
+	if n.typ == V_ERROR {
+		if n.err != nil {
+			return nil, n.err
+		}
+		return nil, n
 	}
 	if n.IsRaw() {
 		return []byte(n.raw), nil
@@ -1275,6 +1395,14 @@ func appendStringJSON(dst []byte, s string, escapeHTML bool) []byte {
 			i++
 			continue
 		}
+		// Escape U+2028/U+2029 like Sonic: the raw runes are valid JSON
+		// but break JavaScript parsers that treat them as line
+		// terminators.
+		if r == 0x2028 || r == 0x2029 {
+			dst = append(dst, '\\', 'u', '2', '0', '2', hexDigit(byte(r&0xF)))
+			i += size
+			continue
+		}
 		dst = append(dst, s[i:i+size]...)
 		i += size
 	}
@@ -1289,7 +1417,10 @@ func hexDigit(b byte) byte {
 }
 
 // decodeRune is a tiny utf8.DecodeRuneInString clone to avoid importing
-// unicode/utf8 just for two call sites.
+// unicode/utf8 just for two call sites. Continuation bytes are validated
+// (s[k]&0xC0 == 0x80); a well-formed prefix with a bad continuation byte
+// must decode as a single invalid byte so following JSON delimiters
+// (quotes, backslashes) are never swallowed.
 func decodeRune(s string) (r rune, size int) {
 	if len(s) == 0 {
 		return 0, 0
@@ -1298,13 +1429,13 @@ func decodeRune(s string) (r rune, size int) {
 	if c < 0x80 {
 		return rune(c), 1
 	}
-	if c&0xE0 == 0xC0 && len(s) >= 2 {
+	if c&0xE0 == 0xC0 && len(s) >= 2 && s[1]&0xC0 == 0x80 {
 		return rune(c&0x1F)<<6 | rune(s[1]&0x3F), 2
 	}
-	if c&0xF0 == 0xE0 && len(s) >= 3 {
+	if c&0xF0 == 0xE0 && len(s) >= 3 && s[1]&0xC0 == 0x80 && s[2]&0xC0 == 0x80 {
 		return rune(c&0x0F)<<12 | rune(s[1]&0x3F)<<6 | rune(s[2]&0x3F), 3
 	}
-	if c&0xF8 == 0xF0 && len(s) >= 4 {
+	if c&0xF8 == 0xF0 && len(s) >= 4 && s[1]&0xC0 == 0x80 && s[2]&0xC0 == 0x80 && s[3]&0xC0 == 0x80 {
 		return rune(c&0x07)<<18 | rune(s[1]&0x3F)<<12 | rune(s[2]&0x3F)<<6 | rune(s[3]&0x3F), 4
 	}
 	return 0xFFFD, 1
@@ -1332,6 +1463,20 @@ func newErrorNode(err error) *Node {
 func (n *Node) ensureLoaded() error {
 	if n == nil {
 		return ErrNotExist
+	}
+	if n.typ == V_ANY && n.raw != "" {
+		// V_ANY wraps a JSON encoding of the original Go value. Loading
+		// converts it to its concrete representation; Type() reports
+		// V_ANY only before the first load (matching the common pattern
+		// of NewAny(...).Type() == V_ANY in Sonic).
+		parsed, perr := parseRawToNode(n.raw)
+		if perr != 0 {
+			n.typ = V_ERROR
+			n.err = perr
+			return perr
+		}
+		*n = parsed
+		return nil
 	}
 	if n.IsRaw() {
 		return n.LoadAll()

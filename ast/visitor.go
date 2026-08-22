@@ -259,6 +259,11 @@ func (p *preorderParser) parseNumber(visitor Visitor) error {
 	}
 	f, err := strconv.ParseFloat(numStr, 64)
 	if err != nil {
+		// Sonic tolerates out-of-range floats (e.g. 1e999) by emitting
+		// ±Inf rather than a syntax error.
+		if numErr, ok := err.(*strconv.NumError); ok && numErr.Err == strconv.ErrRange {
+			return visitor.OnFloat64(f, num)
+		}
 		return &SyntaxError{Pos: start, Src: p.src, Code: nativetypes.ERR_INVALID_NUMBER_FMT, Msg: err.Error()}
 	}
 	return visitor.OnFloat64(f, num)
@@ -307,6 +312,7 @@ func (p *preorderParser) parseString() (string, error) {
 				}
 				// Handle surrogate pair.
 				if r >= 0xD800 && r <= 0xDBFF && p.pos+1 < len(s) && s[p.pos] == '\\' && s[p.pos+1] == 'u' {
+					save := p.pos
 					p.pos += 2
 					r2, err := p.parseUnicodeEscape()
 					if err != nil {
@@ -315,9 +321,17 @@ func (p *preorderParser) parseString() (string, error) {
 					if r2 >= 0xDC00 && r2 <= 0xDFFF {
 						r = 0x10000 + (r-0xD800)<<10 + (r2 - 0xDC00)
 					} else {
-						// Not a low surrogate; emit replacement.
+						// Not a low surrogate: emit U+FFFD for the high
+						// surrogate and rewind so the second escape is
+						// processed on its own iteration (Sonic emits a
+						// replacement per unpaired surrogate instead of
+						// swallowing the second escape).
+						p.pos = save
 						r = 0xFFFD
 					}
+				} else if r >= 0xDC00 && r <= 0xDFFF {
+					// Lone low surrogate.
+					r = 0xFFFD
 				}
 				b.WriteRune(r)
 			default:
