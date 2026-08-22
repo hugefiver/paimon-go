@@ -1,6 +1,6 @@
 module sonic-difftest-local
 
-go 1.24
+go 1.27
 
 require github.com/bytedance/sonic v1.15.2
 
