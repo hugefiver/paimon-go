@@ -8,6 +8,7 @@ package stdjsonv2
 
 import (
 	"bytes"
+	stdjson "encoding/json"
 	"encoding/json"
 	stdjsontext "encoding/json/jsontext"
 	jsonv2 "encoding/json/v2"
@@ -19,6 +20,14 @@ import (
 	"github.com/bytedance/sonic/internal/jsonconv"
 )
 
+const conflictingNumberModes = "can't set OptionUseInt64 and OptionUseNumber both!"
+
+func validateNumberModes(cfg Config) {
+	if cfg.UseNumber && cfg.UseInt64 {
+		panic(conflictingNumberModes)
+	}
+}
+
 // ErrJSONv2ExperimentDisabled is declared for API symmetry with the
 // non-jsonv2 build. Under GOEXPERIMENT=jsonv2 it is never returned by any
 // operation; it exists so callers that reference the error continue to
@@ -28,6 +37,7 @@ var ErrJSONv2ExperimentDisabled = errors.New("stdjsonv2: GOEXPERIMENT=jsonv2 is 
 // froze returns the jsonv2-backed API. It is the build-specific
 // implementation of (Config).Froze declared in api.go.
 func froze(cfg Config) API {
+	validateNumberModes(cfg)
 	return &jsonv2API{
 		cfg:           cfg,
 		marshalOpts:   buildMarshalOptions(cfg),
@@ -48,7 +58,7 @@ func doGet(data []byte, opts ast.SearchOptions, path ...interface{}) (ast.Node, 
 // use of ast.NewRaw (not ast.NewBytes) matches the task contract: the
 // searcher parses raw JSON text on demand.
 func GetWithOptions(src []byte, opts ast.SearchOptions, path ...interface{}) (ast.Node, error) {
-	if len(src) == 0 || !stdjsontext.Value(src).IsValid() {
+	if len(src) == 0 || !stdjsontext.Value(src).IsValid(stdjsontext.AllowDuplicateNames(true), stdjsontext.AllowInvalidUTF8(true)) {
 		return ast.Node{}, &ast.SyntaxError{Src: string(src), Msg: "invalid JSON value"}
 	}
 	opts.ValidateJSON = false
@@ -75,28 +85,19 @@ func (a *jsonv2API) MarshalToString(v interface{}) (string, error) {
 }
 
 func (a *jsonv2API) MarshalIndent(v interface{}, prefix, indent string) ([]byte, error) {
-	// jsonv2 Marshal does not take a prefix; the prefix is applied via the
-	// jsontext.WithIndentPrefix option. The indent string maps to
-	// jsontext.WithIndent. MarshalEncode into a jsontext.Encoder would
-	// re-apply the options, so we simply marshal then format through a
-	// jsontext.Value which handles the canonical formatting.
+	// jsontext.WithIndent/WithIndentPrefix panic when the strings contain
+	// anything other than space/tab, while sonic's MarshalIndent (and
+	// encoding/json) accept arbitrary prefix strings. Marshal compactly,
+	// then re-indent via stdjson.Indent which accepts any characters.
 	b, err := jsonv2.Marshal(v, a.marshalOpts...)
 	if err != nil {
 		return nil, err
 	}
-	// Indent the marshalled bytes using jsontext.Value.Indent, which
-	// accepts the encode-side options. We pass Multiline + WithIndent +
-	// WithIndentPrefix to mirror encoding/json.MarshalIndent semantics.
-	val := stdjsontext.Value(b)
-	encOpts := []stdjsontext.Options{
-		stdjsontext.Multiline(true),
-		stdjsontext.WithIndent(indent),
-		stdjsontext.WithIndentPrefix(prefix),
-	}
-	if err := val.Indent(encOpts...); err != nil {
+	var buf bytes.Buffer
+	if err := stdjson.Indent(&buf, b, prefix, indent); err != nil {
 		return nil, err
 	}
-	return []byte(val), nil
+	return buf.Bytes(), nil
 }
 
 func (a *jsonv2API) UnmarshalFromString(buf string, val interface{}) error {
@@ -108,24 +109,26 @@ func (a *jsonv2API) Unmarshal(data []byte, val interface{}) error {
 }
 
 func (a *jsonv2API) Valid(data []byte) bool {
-	return len(data) > 0 && stdjsontext.Value(data).IsValid()
+	// AllowDuplicateNames/AllowInvalidUTF8 match RFC 8259 syntax (and
+	// the root backend): duplicate object names and invalid UTF-8 are
+	// accepted by standard JSON and must not be rejected here.
+	return len(data) > 0 && stdjsontext.Value(data).IsValid(stdjsontext.AllowDuplicateNames(true), stdjsontext.AllowInvalidUTF8(true))
 }
 
 func (a *jsonv2API) NewEncoder(w io.Writer) Encoder {
-	enc := stdjsontext.NewEncoder(w, a.encodeStreamOptions()...)
 	return &jsonv2Encoder{
-		enc:          enc,
-		w:            w,
-		cfg:          a.cfg,
-		escapeHTML:   a.cfg.EscapeHTML,
-		indent:       "",
-		indentPrefix: "",
-		noNewline:    a.cfg.NoEncoderNewline,
+		w:          w,
+		cfg:        a.cfg,
+		escapeHTML: a.cfg.EscapeHTML,
+		noNewline:  a.cfg.NoEncoderNewline,
 	}
 }
 
 func (a *jsonv2API) NewDecoder(r io.Reader) Decoder {
-	dec := stdjsontext.NewDecoder(r)
+	// AllowDuplicateNames/AllowInvalidUTF8 keep RFC 8259 syntax
+	// acceptance (duplicate object names and invalid UTF-8 are valid
+	// JSON per the standard and accepted by the root backend).
+	dec := stdjsontext.NewDecoder(r, stdjsontext.AllowDuplicateNames(true), stdjsontext.AllowInvalidUTF8(true))
 	return &jsonv2Decoder{
 		dec:                   dec,
 		cfg:                   a.cfg,
@@ -142,12 +145,12 @@ func buildMarshalOptions(cfg Config) []jsonv2.Options {
 	if cfg.SortMapKeys {
 		opts = append(opts, jsonv2.Deterministic(true))
 	}
-	if cfg.NoNullSliceOrMap {
-		opts = append(opts, jsonv2.FormatNilSliceAsNull(false))
-		opts = append(opts, jsonv2.FormatNilMapAsNull(false))
-	}
-	if cfg.CaseSensitive {
-		opts = append(opts, jsonv2.MatchCaseInsensitiveNames(false))
+	// Sonic's default (NoNullSliceOrMap=false) encodes nil slices/maps
+	// as null like encoding/json; jsonv2's default emits []/{}. Force
+	// the null form unless the caller opted into []/{}.
+	if !cfg.NoNullSliceOrMap {
+		opts = append(opts, jsonv2.FormatNilSliceAsNull(true))
+		opts = append(opts, jsonv2.FormatNilMapAsNull(true))
 	}
 	return opts
 }
@@ -158,35 +161,12 @@ func buildUnmarshalOptions(cfg Config) []jsonv2.Options {
 	if cfg.DisallowUnknownFields {
 		opts = append(opts, jsonv2.RejectUnknownMembers(true))
 	}
-	if cfg.CaseSensitive {
-		opts = append(opts, jsonv2.MatchCaseInsensitiveNames(false))
-	}
-	return opts
-}
-
-// encodeStreamOptions builds the jsontext Options slice for a streaming
-// Encoder. It mirrors buildMarshalOptions but only includes the encode-side
-// options (no unmarshal options).
-func (a *jsonv2API) encodeStreamOptions() []stdjsontext.Options {
-	cfg := a.cfg
-	var opts []stdjsontext.Options
-	opts = append(opts, stdjsontext.EscapeForHTML(cfg.EscapeHTML))
-	if cfg.SortMapKeys {
-		// Deterministic is a jsonv2 option but it composes with jsontext
-		// options because Options is the same underlying type.
-		opts = append(opts, jsonv2.Deterministic(true))
-	}
-	if cfg.NoNullSliceOrMap {
-		opts = append(opts, jsonv2.FormatNilSliceAsNull(false))
-		opts = append(opts, jsonv2.FormatNilMapAsNull(false))
-	}
-	if cfg.CaseSensitive {
-		opts = append(opts, jsonv2.MatchCaseInsensitiveNames(false))
-	}
-	if cfg.NoEncoderNewline {
-		// OmitTopLevelNewline is not directly exported as a function in
-		// jsontext; the streaming encoder always appends a newline after a
-		// top-level value. We trim it in Encode when NoEncoderNewline is set.
+	// Sonic's default (CaseSensitive=false) matches keys
+	// case-insensitively like encoding/json v1; jsonv2's default is
+	// case-sensitive. Enable insensitive matching unless the caller
+	// opted into strict case matching.
+	if !cfg.CaseSensitive {
+		opts = append(opts, jsonv2.MatchCaseInsensitiveNames(true))
 	}
 	return opts
 }
@@ -197,6 +177,7 @@ func (a *jsonv2API) encodeStreamOptions() []stdjsontext.Options {
 // expose a UseNumber knob on the v2 API). Otherwise we use jsonv2.Unmarshal
 // to honor the v2-specific options (RejectUnknownMembers, etc.).
 func decodeBytes(data []byte, val interface{}, cfg Config, opts []jsonv2.Options) error {
+	validateNumberModes(cfg)
 	if cfg.UseNumber || cfg.UseInt64 {
 		dec := json.NewDecoder(bytes.NewReader(data))
 		dec.UseNumber()
@@ -214,7 +195,13 @@ func decodeBytes(data []byte, val interface{}, cfg Config, opts []jsonv2.Options
 		}
 		return nil
 	}
-	return jsonv2.Unmarshal(data, val, opts...)
+	// AllowDuplicateNames/AllowInvalidUTF8 keep RFC 8259 syntax
+	// acceptance (both are valid standard JSON and accepted by the root
+	// backend and by encoding/json v1).
+	allOpts := make([]jsonv2.Options, 0, len(opts)+2)
+	allOpts = append(allOpts, opts...)
+	allOpts = append(allOpts, stdjsontext.AllowDuplicateNames(true), stdjsontext.AllowInvalidUTF8(true))
+	return jsonv2.Unmarshal(data, val, allOpts...)
 }
 
 var errTrailingStdJSONData = errors.New("invalid trailing data after top-level value")
@@ -231,96 +218,79 @@ func rejectTrailingStdJSONData(dec *json.Decoder) error {
 	return err
 }
 
-// jsonv2Encoder implements Encoder by wrapping a jsontext.Encoder. It
-// retains the original writer so SetEscapeHTML/SetIndent can rebuild the
-// encoder with new options after construction.
+// jsonv2Encoder implements Encoder by buffering each value and writing
+// it out with short-write retry. It does not wrap a jsontext.Encoder
+// directly because jsontext.Flush silently drops short writes, which
+// would violate the documented io.ErrShortWrite retry contract.
 type jsonv2Encoder struct {
-	enc          *stdjsontext.Encoder
-	w            io.Writer
-	cfg          Config
-	escapeHTML   bool
-	indent       string
+	w          io.Writer
+	cfg        Config
+	escapeHTML bool
+	indent     string
 	indentPrefix string
-	noNewline    bool
+	noNewline  bool
 }
 
-func (e *jsonv2Encoder) Encode(v interface{}) error {
-	// jsonv2.MarshalEncode writes a JSON value to the encoder. The
-	// jsontext streaming encoder auto-flushes when a top-level value
-	// completes and appends a trailing newline unless OmitTopLevelNewline
-	// is set on the encoder's options (which is not exported as a public
-	// option setter). We honor NoEncoderNewline by trimming the trailing
-	// newline from the underlying *bytes.Buffer when the caller used one
-	// (the common test path); for arbitrary writers the newline remains.
+// encodeOptions returns the jsonv2 options for one Encode call.
+func (e *jsonv2Encoder) encodeOptions() []jsonv2.Options {
 	opts := []jsonv2.Options{
 		stdjsontext.EscapeForHTML(e.escapeHTML),
 	}
 	if e.cfg.SortMapKeys {
 		opts = append(opts, jsonv2.Deterministic(true))
 	}
-	if e.cfg.NoNullSliceOrMap {
-		opts = append(opts, jsonv2.FormatNilSliceAsNull(false))
-		opts = append(opts, jsonv2.FormatNilMapAsNull(false))
+	// Sonic's default (NoNullSliceOrMap=false) encodes nil slices/maps
+	// as null; jsonv2's default emits []/{}.
+	if !e.cfg.NoNullSliceOrMap {
+		opts = append(opts, jsonv2.FormatNilSliceAsNull(true))
+		opts = append(opts, jsonv2.FormatNilMapAsNull(true))
 	}
-	if e.cfg.CaseSensitive {
-		opts = append(opts, jsonv2.MatchCaseInsensitiveNames(false))
-	}
-	if err := jsonv2.MarshalEncode(e.enc, v, opts...); err != nil {
+	return opts
+}
+
+func (e *jsonv2Encoder) Encode(v interface{}) error {
+	b, err := jsonv2.Marshal(v, e.encodeOptions()...)
+	if err != nil {
 		return err
 	}
-	// Trim trailing newline for NoEncoderNewline when the writer is a
-	// bytes.Buffer (we can mutate its tail in place).
-	if e.noNewline {
-		if bb, ok := e.w.(*bytes.Buffer); ok {
-			b := bb.Bytes()
-			for len(b) > 0 && b[len(b)-1] == '\n' {
-				b = b[:len(b)-1]
-				bb.Truncate(len(b))
-			}
+	if e.indent != "" || e.indentPrefix != "" {
+		// json.Indent accepts arbitrary prefix/indent characters; the
+		// jsontext WithIndent options panic on non-space characters.
+		var buf bytes.Buffer
+		if err := stdjson.Indent(&buf, b, e.indentPrefix, e.indent); err != nil {
+			return err
 		}
+		b = buf.Bytes()
 	}
-	return nil
+	if !e.noNewline {
+		b = append(b, '\n')
+	}
+	return writeAll(e.w, b)
 }
 
 func (e *jsonv2Encoder) SetEscapeHTML(on bool) {
 	e.escapeHTML = on
-	// Rebuild the underlying jsontext.Encoder with the new escape setting.
-	e.reconfigure()
 }
 
 func (e *jsonv2Encoder) SetIndent(prefix, indent string) {
 	e.indentPrefix = prefix
 	e.indent = indent
-	e.reconfigure()
 }
 
-// reconfigure rebuilds the underlying jsontext.Encoder with the current
-// escape/indent settings. It calls Encoder.Reset, which requires the
-// writer; we retained the writer reference at construction time so we
-// can pass it back. Calling Reset between Encode calls is safe but may
-// discard data buffered (not yet flushed) by the encoder.
-func (e *jsonv2Encoder) reconfigure() {
-	opts := []stdjsontext.Options{stdjsontext.EscapeForHTML(e.escapeHTML)}
-	if e.cfg.SortMapKeys {
-		opts = append(opts, jsonv2.Deterministic(true))
-	}
-	if e.cfg.NoNullSliceOrMap {
-		opts = append(opts, jsonv2.FormatNilSliceAsNull(false))
-		opts = append(opts, jsonv2.FormatNilMapAsNull(false))
-	}
-	if e.cfg.CaseSensitive {
-		opts = append(opts, jsonv2.MatchCaseInsensitiveNames(false))
-	}
-	if e.indent != "" || e.indentPrefix != "" {
-		opts = append(opts, stdjsontext.Multiline(true))
-		if e.indent != "" {
-			opts = append(opts, stdjsontext.WithIndent(e.indent))
+// writeAll writes p to w, retrying short writes until the whole buffer
+// is written. A write that makes no progress returns io.ErrShortWrite.
+func writeAll(w io.Writer, p []byte) error {
+	for offset := 0; offset < len(p); {
+		n, err := w.Write(p[offset:])
+		if err != nil {
+			return err
 		}
-		if e.indentPrefix != "" {
-			opts = append(opts, stdjsontext.WithIndentPrefix(e.indentPrefix))
+		if n <= 0 || n > len(p)-offset {
+			return io.ErrShortWrite
 		}
+		offset += n
 	}
-	e.enc.Reset(e.w, opts...)
+	return nil
 }
 
 // jsonv2Decoder implements Decoder by wrapping a jsontext.Decoder.
@@ -365,6 +335,9 @@ func (d *jsonv2Decoder) More() bool {
 }
 
 func (d *jsonv2Decoder) UseNumber() {
+	if d.cfg.UseInt64 {
+		panic(conflictingNumberModes)
+	}
 	d.useNumber = true
 	d.cfg.UseNumber = true
 }
