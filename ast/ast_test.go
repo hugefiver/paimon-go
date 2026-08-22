@@ -19,8 +19,8 @@ func TestNodeParseLookupMutationAndSort(t *testing.T) {
 		t.Fatalf("path string = %q, %v; want y, nil", got, err)
 	}
 	changed, err := n.Set("c", NewNumber("3"))
-	if err != nil || !changed {
-		t.Fatalf("Set(c) = %v, %v; want true, nil", changed, err)
+	if err != nil || changed {
+		t.Fatalf("Set(c) = %v, %v; want false, nil (Sonic: new key reports false)", changed, err)
 	}
 	if err := n.SortKeys(false); err != nil {
 		t.Fatalf("SortKeys(false) error = %v", err)
@@ -152,8 +152,8 @@ func TestMarshalJSONPreservesUnloadedRawChildrenFirstValue(t *testing.T) {
 		t.Fatalf("Add(raw object) error = %v", err)
 	}
 	objectWithString := NewObject(nil)
-	if added, err := objectWithString.Set("string", NewRaw(`"value" trailing`)); err != nil || !added {
-		t.Fatalf("Set(raw string) = %v, %v; want true, nil", added, err)
+	if added, err := objectWithString.Set("string", NewRaw(`"value" trailing`)); err != nil || added {
+		t.Fatalf("Set(raw string) = %v, %v; want false, nil (Sonic: new key reports false)", added, err)
 	}
 
 	for _, tt := range []struct {

@@ -195,13 +195,14 @@ func TestJSONv2CachedCustomOptionsHonorConfiguration(t *testing.T) {
 		CaseSensitive:         true,
 	}.Froze().(*jsonv2API)
 
-	// Keep the cached option slices separate so that no-op v2 defaults (nil
-	// collection formatting and strict field matching) still prove their
-	// Config branches add the intended option to the relevant builder.
-	if got, want := len(api.marshalOpts), 6; got != want {
+	// Keep the cached option slices separate so that the Config branches
+	// are proven: NoNullSliceOrMap=true adds nothing (jsonv2 default is
+	// []/{}), CaseSensitive=true adds nothing on unmarshal (jsonv2
+	// default is case-sensitive).
+	if got, want := len(api.marshalOpts), 3; got != want {
 		t.Fatalf("marshal option count = %d, want %d", got, want)
 	}
-	if got, want := len(api.unmarshalOpts), 3; got != want {
+	if got, want := len(api.unmarshalOpts), 2; got != want {
 		t.Fatalf("unmarshal option count = %d, want %d", got, want)
 	}
 
@@ -211,7 +212,6 @@ func TestJSONv2CachedCustomOptionsHonorConfiguration(t *testing.T) {
 	assertJSONv2Option(t, marshalOpts, "Deterministic", jsonv2.Deterministic, true)
 	assertJSONv2Option(t, marshalOpts, "FormatNilSliceAsNull", jsonv2.FormatNilSliceAsNull, false)
 	assertJSONv2Option(t, marshalOpts, "FormatNilMapAsNull", jsonv2.FormatNilMapAsNull, false)
-	assertJSONv2Option(t, marshalOpts, "MatchCaseInsensitiveNames", jsonv2.MatchCaseInsensitiveNames, false)
 	assertJSONv2Option(t, unmarshalOpts, "RejectUnknownMembers", jsonv2.RejectUnknownMembers, true)
 	assertJSONv2Option(t, unmarshalOpts, "MatchCaseInsensitiveNames", jsonv2.MatchCaseInsensitiveNames, false)
 

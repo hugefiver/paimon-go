@@ -108,6 +108,10 @@ implementation supplies a content estimate, whereas upstream Sonic uses a
 fixed capacity of 16 for non-empty containers; callers must treat capacity as
 a preallocation hint.
 
+Unpaired UTF-16 surrogate escapes decode to U+FFFD (Sonic semantics) and
+leading-zero number literals such as `0123` round-trip verbatim. Nesting is
+accepted up to Sonic's MAX_RECURSE limit (4096 levels).
+
 Unloaded `ast.NewRaw` nodes report the same concrete root `Type()` values as
 Sonic. `decoder.Skip` also aligns its negative error start code and diagnostic
 cursor with Sonic for malformed input. A root API configured with both
@@ -141,6 +145,11 @@ limitations include:
 - `NoEncoderNewline` can only be fully honored when the encoder can trim a
   mutable `*bytes.Buffer`; arbitrary writers may still receive the jsontext
   encoder's top-level newline.
+  (Update: the streaming encoder now buffers each value and writes it with
+  short-write retry, so `NoEncoderNewline` is honored for arbitrary writers
+  and short writes are retried per the stream-encoding contract.)
+- Standard JSON documents with duplicate object names or invalid UTF-8
+  (valid per RFC 8259) are accepted, matching the root backend.
 - Several Sonic configuration flags are accepted but not fully mapped to
   jsonv2/jsontext behavior, especially flags tied to Sonic's native codec or
   unsupported jsonv2 knobs.

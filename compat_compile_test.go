@@ -660,8 +660,9 @@ func TestCompileCompatibilityAST(t *testing.T) {
 	if err := arr.AddAny(42); err != nil {
 		t.Fatalf("AddAny: %v", err)
 	}
-	if ok, err := obj.Set("new", ast.NewNull()); err != nil || !ok {
-		t.Fatalf("Set: %v %v", ok, err)
+	if ok, err := obj.Set("new", ast.NewNull()); err != nil || ok {
+		// Sonic semantics: adding a new key reports false.
+		t.Fatalf("Set: %v %v (Sonic returns false for a new key)", ok, err)
 	}
 	if ok, err := obj.SetAny("new2", 42); err != nil || !ok {
 		// tolerate non-ok as long as no error
