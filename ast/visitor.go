@@ -79,7 +79,7 @@ func (p *preorderParser) parseObject(visitor Visitor) error {
 	if err := visitor.OnObjectBegin(capacity); err != nil {
 		if errors.Is(err, VisitOPSkip) {
 			// Skip the object body but still emit the end event.
-			if err := p.skipContainer(); err != nil {
+			if err := p.skipContainer('{'); err != nil {
 				return err
 			}
 			return visitor.OnObjectEnd()
@@ -152,7 +152,7 @@ func (p *preorderParser) parseArray(visitor Visitor) error {
 	capacity := p.guessContainerSize()
 	if err := visitor.OnArrayBegin(capacity); err != nil {
 		if errors.Is(err, VisitOPSkip) {
-			if err := p.skipContainer(); err != nil {
+			if err := p.skipContainer('['); err != nil {
 				return err
 			}
 			return visitor.OnArrayEnd()
@@ -240,6 +240,12 @@ func (p *preorderParser) parseNumber(visitor Visitor) error {
 	}
 	if p.pos < len(s) && (s[p.pos] == 'e' || s[p.pos] == 'E') {
 		p.pos++
+		if p.pos < len(s) && isJSONNumberTerminator(s[p.pos]) {
+			if p.onlyNumber {
+				return visitor.OnFloat64(0, json.Number(s[start:p.pos]))
+			}
+			return &SyntaxError{Pos: p.pos, Src: p.src, Code: nativetypes.ERR_INVALID_NUMBER_FMT, Msg: "invalid exponent"}
+		}
 		if p.pos < len(s) && (s[p.pos] == '+' || s[p.pos] == '-') {
 			p.pos++
 		}
@@ -388,10 +394,13 @@ func (p *preorderParser) parseUnicodeEscape() (rune, error) {
 	return r, nil
 }
 
-// skipContainer skips the body of the container starting at p.pos-1's
-// body. p.pos must point at the first byte after the opening brace or
-// bracket.
-func (p *preorderParser) skipContainer() error {
+// skipContainer skips the body of a container. p.pos must point at the first
+// byte after open.
+func (p *preorderParser) skipContainer(open byte) error {
+	expectedClose := byte('}')
+	if open == '[' {
+		expectedClose = ']'
+	}
 	depth := 1
 	inString := false
 	for p.pos < len(p.src) {
@@ -415,6 +424,9 @@ func (p *preorderParser) skipContainer() error {
 		case '}', ']':
 			depth--
 			if depth == 0 {
+				if c != expectedClose {
+					return &SyntaxError{Pos: p.pos, Src: p.src, Code: nativetypes.ERR_INVALID_CHAR, Msg: "mismatched closing delimiter"}
+				}
 				p.pos++
 				return nil
 			}
@@ -432,8 +444,9 @@ func (p *preorderParser) skipValue() error {
 	}
 	switch p.src[p.pos] {
 	case '{', '[':
+		open := p.src[p.pos]
 		p.pos++
-		return p.skipContainer()
+		return p.skipContainer(open)
 	case '"':
 		// Skip a string literal.
 		p.pos++

@@ -57,6 +57,23 @@ func TestRootMarshalEncodesOnceWithoutHTMLEscaping(t *testing.T) {
 	}
 }
 
+func TestRootMarshalIndentEncodesOnceWithoutHTMLEscaping(t *testing.T) {
+	value := &rootCountingMarshaler{}
+	encoded, err := MarshalIndent(value, "", "  ")
+	if err != nil {
+		t.Fatalf("MarshalIndent error = %v", err)
+	}
+	if value.calls != 1 {
+		t.Fatalf("MarshalJSON calls = %d, want 1", value.calls)
+	}
+	if !bytes.Contains(encoded, []byte(`<tag>`)) {
+		t.Fatalf("MarshalIndent output = %s, want literal <tag>", encoded)
+	}
+	if bytes.HasSuffix(encoded, []byte{'\n'}) {
+		t.Fatalf("MarshalIndent output has trailing newline: %q", encoded)
+	}
+}
+
 func TestRootMarshalUnmarshalAndConfig(t *testing.T) {
 	b, err := Marshal(apiSample{Name: "<x>", Count: 2})
 	if err != nil {
@@ -190,42 +207,39 @@ func TestConfigUseInt64StreamDecoderConvertsNestedInterfaceValues(t *testing.T) 
 	}
 }
 
-func TestConfigPanicsOnUseNumberAndUseInt64(t *testing.T) {
+func TestConfigUseNumberTakesPrecedenceOverUseInt64(t *testing.T) {
 	api := Config{UseNumber: true, UseInt64: true}.Froze()
-	const want = "can't set OptionUseInt64 and OptionUseNumber both!"
 
-	tests := []struct {
-		name   string
-		invoke func()
-	}{
-		{
-			name: "Unmarshal",
-			invoke: func() {
-				var out interface{}
-				_ = api.Unmarshal([]byte(`null`), &out)
-			},
-		},
-		{
-			name: "NewDecoder",
-			invoke: func() {
-				_ = api.NewDecoder(strings.NewReader(`null`))
-			},
-		},
+	var scalar interface{}
+	if err := api.Unmarshal([]byte(`1`), &scalar); err != nil {
+		t.Fatalf("Unmarshal scalar error = %v", err)
+	}
+	if got, ok := scalar.(json.Number); !ok || got.String() != "1" {
+		t.Fatalf("scalar = %v (%T), want json.Number(1)", scalar, scalar)
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			var got interface{}
-			func() {
-				defer func() {
-					got = recover()
-				}()
-				tt.invoke()
-			}()
-			if got != want {
-				t.Fatalf("panic = %v, want %q", got, want)
-			}
-		})
+	var nested map[string]interface{}
+	if err := api.Unmarshal([]byte(`{"n":1,"a":[2]}`), &nested); err != nil {
+		t.Fatalf("Unmarshal nested error = %v", err)
+	}
+	array, ok := nested["a"].([]interface{})
+	if !ok || len(array) != 1 {
+		t.Fatalf("a = %v (%T), want one-element []interface{}", nested["a"], nested["a"])
+	}
+	if got, ok := nested["n"].(json.Number); !ok || got.String() != "1" {
+		t.Fatalf("nested.n = %v (%T), want json.Number(1)", nested["n"], nested["n"])
+	}
+	if got, ok := array[0].(json.Number); !ok || got.String() != "2" {
+		t.Fatalf("nested.a[0] = %v (%T), want json.Number(2)", array[0], array[0])
+	}
+
+	dec := api.NewDecoder(strings.NewReader(`1`))
+	var streamed interface{}
+	if err := dec.Decode(&streamed); err != nil {
+		t.Fatalf("stream Decode error = %v", err)
+	}
+	if got, ok := streamed.(json.Number); !ok || got.String() != "1" {
+		t.Fatalf("streamed = %v (%T), want json.Number(1)", streamed, streamed)
 	}
 }
 

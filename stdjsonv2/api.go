@@ -1,14 +1,17 @@
 // Package stdjsonv2 is an explicit backend subpackage that exposes the
-// Sonic v1.15.2 high-frequency JSON API backed by encoding/json/v2 when
-// the toolchain is built with GOEXPERIMENT=jsonv2.
+// Sonic v1.15.2 high-frequency JSON API backed by encoding/json/v2 when the
+// goexperiment.jsonv2 build constraint is enabled. On Go 1.27, jsonv2 is an
+// ambient default, so an unset GOEXPERIMENT uses the real backend; explicit
+// GOEXPERIMENT=none selects the deterministic disabled stub, while explicit
+// GOEXPERIMENT=jsonv2 also selects the real backend.
 //
 // The public API surface (Config, API, Encoder, Decoder, and the
 // package-level helpers) is declared in this file and shared across build
 // configurations. The concrete behavior is provided by:
 //
-//   - stub.go  (default, //go:build !goexperiment.jsonv2): every operation
-//     returns a deterministic "experiment disabled" error so callers can
-//     detect the absence of the jsonv2 backend at runtime.
+//   - stub.go  (//go:build !goexperiment.jsonv2): every operation returns a
+//     deterministic "experiment disabled" error so callers can detect the
+//     absence of the jsonv2 backend at runtime.
 //   - jsonv2.go (//go:build goexperiment.jsonv2): a real implementation
 //     using encoding/json/v2 and encoding/json/jsontext.
 //
@@ -79,10 +82,12 @@ type Decoder interface {
 	UseNumber()
 }
 
-// Froze freezes the configuration into an immutable API instance. The
-// concrete implementation is selected by build tags: under
-// GOEXPERIMENT=jsonv2 it returns a jsonv2-backed API; otherwise it
-// returns an API whose every operation fails with ErrJSONv2ExperimentDisabled.
+// Froze freezes the configuration into an immutable API instance. The concrete
+// implementation is selected by the goexperiment.jsonv2 build constraint. On
+// Go 1.27, an unset GOEXPERIMENT uses the jsonv2-backed API; explicit
+// GOEXPERIMENT=none returns an API whose every operation fails with
+// ErrJSONv2ExperimentDisabled, while explicit GOEXPERIMENT=jsonv2 uses the
+// jsonv2-backed API.
 func (cfg Config) Froze() API { return froze(cfg) }
 
 // Pre-configured API instances. They mirror the root package's

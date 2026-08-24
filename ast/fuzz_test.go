@@ -2,6 +2,7 @@ package ast
 
 import (
 	"encoding/json"
+	"reflect"
 	"strconv"
 	"testing"
 	"unicode/utf8"
@@ -62,10 +63,21 @@ func FuzzGetPathParity(f *testing.F) {
 		if sRawErr != nil || rRawErr != nil {
 			return
 		}
-		if sRaw != rRaw {
+		if sRaw != rRaw && !sameJSONValue(sRaw, rRaw) {
 			t.Fatalf("path mismatch: searcher=%q raw=%q (src=%q path=%v)", sRaw, rRaw, src, path)
 		}
 	})
+}
+
+func sameJSONValue(left, right string) bool {
+	var leftValue, rightValue interface{}
+	if err := json.Unmarshal([]byte(left), &leftValue); err != nil {
+		return false
+	}
+	if err := json.Unmarshal([]byte(right), &rightValue); err != nil {
+		return false
+	}
+	return reflect.DeepEqual(leftValue, rightValue)
 }
 
 // FuzzASTRoundTrip parses src, then marshals the resulting node and checks

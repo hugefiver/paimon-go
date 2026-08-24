@@ -85,15 +85,14 @@ const (
 // is always backed by encoding/json so fallback is never enabled.
 const EnableFallback = false
 
-// optionToConfig translates the encoder Options bitmask into the
-// backend.Config the reflection backend consumes. SortMapKeys is set
-// when either the SortMapKeys bit or the CompatibleWithStd bit is set,
-// because CompatibleWithStd implies sorted keys (matching upstream
-// Sonic behavior).
+// optionToConfig translates each concrete encoder option bit independently.
+// CompatibleWithStd is the composite alias SortMapKeys | EscapeHTML |
+// CompactMarshaler, so checking the three concrete bits also gives the alias
+// its documented behavior without treating any single member as the alias.
 func optionToConfig(opts Options) backend.Config {
-	cfg := backend.Config{
+	return backend.Config{
 		EscapeHTML:              opts&EscapeHTML != 0,
-		SortMapKeys:             opts&SortMapKeys != 0 || opts&CompatibleWithStd != 0,
+		SortMapKeys:             opts&SortMapKeys != 0,
 		CompactMarshaler:        opts&CompactMarshaler != 0,
 		NoQuoteTextMarshaler:    opts&NoQuoteTextMarshaler != 0,
 		NoNullSliceOrMap:        opts&NoNullSliceOrMap != 0,
@@ -102,12 +101,6 @@ func optionToConfig(opts Options) backend.Config {
 		NoEncoderNewline:        opts&NoEncoderNewline != 0,
 		EncodeNullForInfOrNan:   opts&EncodeNullForInfOrNan != 0,
 	}
-	if opts&CompatibleWithStd != 0 {
-		// CompatibleWithStd also enables HTML escaping to match
-		// encoding/json's defaults.
-		cfg.EscapeHTML = true
-	}
-	return cfg
 }
 
 // Encode marshals v into a compact JSON byte slice under opts. It is the

@@ -24,7 +24,8 @@ import (
 // Valid reports whether data is a single well-formed JSON value. The fast path
 // uses fastjson's allocation-free validator. Sonic accepts raw control bytes
 // inside strings, while fastjson.ValidateBytes rejects them, so those rare
-// inputs fall back to Parser.ParseBytes to preserve Sonic-compatible behavior.
+// inputs are normalized and checked with encoding/json to preserve only that
+// documented Sonic-compatible exception.
 func Valid(data []byte) bool {
 	if len(data) == 0 {
 		return false
@@ -53,15 +54,44 @@ func ValidString(data string) bool {
 }
 
 func validSonicValueBytes(data []byte) bool {
-	start := skipJSONSpace(data, 0)
-	if start == len(data) {
-		return false
+	return json.Valid(escapeRawStringControls(data))
+}
+
+func escapeRawStringControls(data []byte) []byte {
+	var out []byte
+	last := 0
+	inString := false
+	escaped := false
+	const hex = "0123456789abcdef"
+	for i, c := range data {
+		if !inString {
+			if c == '"' {
+				inString = true
+			}
+			continue
+		}
+		if escaped {
+			escaped = false
+			continue
+		}
+		switch {
+		case c == '\\':
+			escaped = true
+		case c == '"':
+			inString = false
+		case c < 0x20:
+			if out == nil {
+				out = make([]byte, 0, len(data)+5)
+			}
+			out = append(out, data[last:i]...)
+			out = append(out, '\\', 'u', '0', '0', hex[c>>4], hex[c&0x0f])
+			last = i + 1
+		}
 	}
-	end, ok := scanValueEnd(data, start, 0)
-	if !ok {
-		return false
+	if out == nil {
+		return data
 	}
-	return skipJSONSpace(data, end) == len(data)
+	return append(out, data[last:]...)
 }
 
 // Get resolves path against data and returns the matching AST node.
@@ -321,7 +351,7 @@ func findObjectValueStart(data []byte, start int, key string) (int, scanStatus) 
 			}
 			return valueStart, scanFound
 		}
-		valueEnd, ok := scanValueEnd(data, valueStart, 0)
+		valueEnd, ok := scanPreTargetValueEnd(data, valueStart)
 		if !ok {
 			return 0, scanInvalid
 		}
@@ -357,7 +387,7 @@ func findArrayValueStart(data []byte, start int, idx int) (int, scanStatus) {
 		if cur == idx {
 			return i, scanFound
 		}
-		valueEnd, ok := scanValueEnd(data, i, 0)
+		valueEnd, ok := scanPreTargetValueEnd(data, i)
 		if !ok {
 			return 0, scanInvalid
 		}
@@ -468,6 +498,67 @@ func findArrayValue(data []byte, start, end int, idx int) (int, int, scanStatus)
 // maxScanDepth mirrors Sonic's MAX_RECURSE limit (4096); fastjson's
 // MaxDepth of 300 would reject valid deep documents Sonic accepts.
 const maxScanDepth = 4096
+
+func scanPreTargetValueEnd(data []byte, start int) (int, bool) {
+	if start < len(data) && (data[start] == '{' || data[start] == '[') {
+		return scanContainerEnd(data, start)
+	}
+	return scanValueEnd(data, start, 0)
+}
+
+func scanContainerEnd(data []byte, start int) (int, bool) {
+	expects := make([]byte, 0, 8)
+	push := func(c byte) bool {
+		if len(expects) == maxScanDepth {
+			return false
+		}
+		if c == '{' {
+			expects = append(expects, '}')
+		} else {
+			expects = append(expects, ']')
+		}
+		return true
+	}
+	if !push(data[start]) {
+		return 0, false
+	}
+	inString := false
+	escaped := false
+	for i := start + 1; i < len(data); i++ {
+		c := data[i]
+		if inString {
+			if escaped {
+				escaped = false
+				continue
+			}
+			if c == '\\' {
+				escaped = true
+				continue
+			}
+			if c == '"' {
+				inString = false
+			}
+			continue
+		}
+		switch c {
+		case '"':
+			inString = true
+		case '{', '[':
+			if !push(c) {
+				return 0, false
+			}
+		case '}', ']':
+			if len(expects) == 0 || c != expects[len(expects)-1] {
+				return 0, false
+			}
+			expects = expects[:len(expects)-1]
+			if len(expects) == 0 {
+				return i + 1, true
+			}
+		}
+	}
+	return 0, false
+}
 
 func scanValueEnd(data []byte, start int, depth int) (int, bool) {
 	if depth > maxScanDepth || start >= len(data) {
@@ -614,6 +705,9 @@ func scanNumberEnd(data []byte, start int) (int, bool) {
 	}
 	if i < len(data) && (data[i] == 'e' || data[i] == 'E') {
 		i++
+		if i < len(data) && isJSONNumberTerminator(data[i]) {
+			return i, true
+		}
 		if i < len(data) && (data[i] == '+' || data[i] == '-') {
 			i++
 		}
@@ -637,6 +731,15 @@ func skipJSONSpace(data []byte, i int) int {
 		}
 	}
 	return i
+}
+
+func isJSONNumberTerminator(c byte) bool {
+	switch c {
+	case ' ', '\n', '\r', '\t', ',', ']', '}':
+		return true
+	default:
+		return false
+	}
 }
 
 func asciiKeyEqual(raw []byte, key string) bool {

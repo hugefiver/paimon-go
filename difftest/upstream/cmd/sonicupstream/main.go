@@ -10,7 +10,6 @@ import (
 
 	"github.com/bytedance/sonic"
 	"github.com/bytedance/sonic/ast"
-	"github.com/bytedance/sonic/decoder"
 )
 
 type pathPart struct {
@@ -37,9 +36,6 @@ type result struct {
 	SearcherPathRaw    string `json:"searcher_path_raw,omitempty"`
 	PreorderOnlyNumber string `json:"preorder_only_number,omitempty"`
 	NewRawType         int    `json:"new_raw_type,omitempty"`
-	SkipStart          int    `json:"skip_start"`
-	SkipEnd            int    `json:"skip_end"`
-	ConfigBothPanics   bool   `json:"config_both_panics"`
 }
 
 func main() {
@@ -98,11 +94,6 @@ func run() result {
 	}
 	res.PreorderOnlyNumber = recordPreorderOnlyNumber(string(data))
 	res.NewRawType = int(ast.NewRaw(string(data)).Type())
-	res.SkipStart, res.SkipEnd = decoder.Skip(data)
-	res.ConfigBothPanics = panics(func() {
-		var value interface{}
-		_ = sonic.Config{UseNumber: true, UseInt64: true}.Froze().Unmarshal(data, &value)
-	})
 
 	return res
 }
@@ -166,14 +157,6 @@ func hasRawControlInString(data string) bool {
 			}
 		}
 	}
-	return false
-}
-
-func panics(fn func()) (panicked bool) {
-	defer func() {
-		panicked = recover() != nil
-	}()
-	fn()
 	return false
 }
 

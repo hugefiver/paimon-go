@@ -33,8 +33,8 @@ func TestDefaultBuildEnablesObservedRawParserCompatibility(t *testing.T) {
 	if raw, err := n.Raw(); err != nil || raw != "7" {
 		t.Fatalf("Raw() = %q, %v; want first number", raw, err)
 	}
-	if !Valid([]byte(`{"a":"\q","b":1}`)) {
-		t.Fatalf(`Valid({"a":"\q","b":1}) = false, want true by default`)
+	if Valid([]byte(`{"a":"\q","b":1}`)) {
+		t.Fatalf(`Valid({"a":"\q","b":1}) = true, want false`)
 	}
 	n, err = Get([]byte(`{"a":{"b":"\q"}}`), "a")
 	if err != nil {
@@ -55,8 +55,26 @@ func TestDefaultBuildMatchesSonicMalformedNumberBoundaries(t *testing.T) {
 		if Valid(data) {
 			t.Fatalf("Valid(%q) = true, want false", data)
 		}
+	}
+
+	for _, data := range [][]byte{
+		[]byte(`{"a":1.}`),
+		[]byte(`{"a":+1}`),
+	} {
 		if _, err := Get(data); err == nil {
 			t.Fatalf("Get(%q) error = nil, want error", data)
+		}
+	}
+	for _, data := range [][]byte{
+		[]byte(`{"a":1e}`),
+		[]byte{'{', '"', 'a', '"', ':', '"', 0x11, 'a', '"', ',', '"', 'b', '"', ':', '1', 'e', '}'},
+	} {
+		n, err := Get(data)
+		if err != nil {
+			t.Fatalf("Get(%q) error = %v, want tolerant raw container", data, err)
+		}
+		if raw, err := n.Raw(); err != nil || raw != string(data) {
+			t.Fatalf("Get(%q).Raw() = %q, %v; want original raw", data, raw, err)
 		}
 	}
 
@@ -71,19 +89,25 @@ func TestDefaultBuildMatchesSonicMalformedNumberBoundaries(t *testing.T) {
 
 	for _, data := range [][]byte{
 		[]byte(`{"a":1.}`),
-		[]byte(`{"a":1e}`),
 		[]byte(`{"a":+1}`),
 	} {
 		if _, err := Get(data, "a"); err == nil {
 			t.Fatalf("Get(%q, a) error = nil, want error", data)
 		}
 	}
+	n, err = Get([]byte(`{"a":1e}`), "a")
+	if err != nil {
+		t.Fatalf(`Get({"a":1e}, a) error = %v, want nil`, err)
+	}
+	if raw, err := n.Raw(); err != nil || raw != "1e" {
+		t.Fatalf(`Get({"a":1e}, a).Raw() = %q, %v; want "1e", nil`, raw, err)
+	}
 }
 
 func TestDefaultBuildPreservesLeadingZeroNumberLiteralsLikeSonic(t *testing.T) {
 	data := []byte(`{"a":0123}`)
-	if !Valid(data) {
-		t.Fatalf(`Valid({"a":0123}) = false, want true`)
+	if Valid(data) {
+		t.Fatalf(`Valid({"a":0123}) = true, want false`)
 	}
 	for name, fn := range map[string]func() (ast.Node, error){
 		"Get": func() (ast.Node, error) { return Get(data, "a") },

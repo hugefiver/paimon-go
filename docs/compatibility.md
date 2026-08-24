@@ -27,8 +27,9 @@ The compatibility target is Sonic `v1.15.2` for these packages and surfaces:
 - `option`: compile-option symbols accepted by Sonic APIs such as `Pretouch`;
 - `unquote` and `utf8`: exported helpers used by Sonic-compatible callers;
 - `fastjson`: explicit thin wrapper subpackage over the root backend;
-- `stdjsonv2`: experimental backend subpackage with a default disabled stub
-  and a real jsonv2 implementation under the jsonv2 experiment.
+- `stdjsonv2`: experimental backend subpackage with a real implementation
+  selected by the Go 1.27 default experiment set or explicit `jsonv2`, and a
+  deterministic disabled stub under explicit `none`.
 
 `github.com/bytedance/sonic/loader` is intentionally out of scope and is not
 implemented.
@@ -71,13 +72,12 @@ behavior as the root/default backend.
 
 `github.com/bytedance/sonic/stdjsonv2` is opt-in and experimental.
 
-- Without `$env:GOEXPERIMENT = "jsonv2"` it builds as a deterministic stub.
-  Operational APIs return `ErrJSONv2ExperimentDisabled`; `Valid*` returns
-  `false`; stream encoders/decoders are present but fail/no-op in the same
-  disabled mode. This keeps the package importable on normal toolchains.
-- With `$env:GOEXPERIMENT = "jsonv2"`, and only on a Go toolchain that
-  provides `encoding/json/v2` and `encoding/json/jsontext`, the package builds
-  a real backend using those APIs.
+- The Go 1.27 default experiment set and explicit
+  `$env:GOEXPERIMENT = "jsonv2"` select the real backend, which requires
+  `encoding/json/v2` and `encoding/json/jsontext`.
+- Explicit `$env:GOEXPERIMENT = "none"` selects the deterministic disabled
+  stub: operational APIs return `ErrJSONv2ExperimentDisabled`; `Valid*`
+  returns `false`; stream APIs are present but fail/no-op consistently.
 
 ## Known behavioral differences
 
@@ -114,9 +114,12 @@ accepted up to Sonic's MAX_RECURSE limit (4096 levels).
 
 Unloaded `ast.NewRaw` nodes report the same concrete root `Type()` values as
 Sonic. `decoder.Skip` also aligns its negative error start code and diagnostic
-cursor with Sonic for malformed input. A root API configured with both
-`UseNumber` and `UseInt64` panics, matching Sonic's conflicting-option
-behavior.
+cursor with Sonic for malformed input. On the reflection fallback, a root or
+`stdjsonv2` API configured with both `UseNumber` and `UseInt64` follows Sonic
+v1.15.2's Go 1.27 fallback behavior: `UseNumber` takes precedence, so numbers
+decoded into interfaces are `json.Number` values. The `decoder.Decoder`
+bitmask API is distinct: `SetOptions` with both option bits panics, matching
+the upstream decoder package.
 
 ### Stream encoding
 
@@ -138,23 +141,19 @@ Sonic configuration compatibility or bug-free equivalence.
 
 ### `stdjsonv2` limits
 
-The real `stdjsonv2` backend requires both the jsonv2 Go experiment and a
-toolchain that exposes `encoding/json/v2` plus `encoding/json/jsontext`. Known
-limitations include:
+The real `stdjsonv2` backend requires a toolchain that exposes both
+`encoding/json/v2` and `encoding/json/jsontext` and an effective experiment set
+that includes jsonv2. Known limitations include:
 
-- `NoEncoderNewline` can only be fully honored when the encoder can trim a
-  mutable `*bytes.Buffer`; arbitrary writers may still receive the jsontext
-  encoder's top-level newline.
-  (Update: the streaming encoder now buffers each value and writes it with
-  short-write retry, so `NoEncoderNewline` is honored for arbitrary writers
-  and short writes are retried per the stream-encoding contract.)
+- `NoEncoderNewline` is honored for arbitrary writers by buffering each value
+  and writing it with short-write retry.
 - Standard JSON documents with duplicate object names or invalid UTF-8
   (valid per RFC 8259) are accepted, matching the root backend.
 - Several Sonic configuration flags are accepted but not fully mapped to
   jsonv2/jsontext behavior, especially flags tied to Sonic's native codec or
   unsupported jsonv2 knobs.
-- The disabled stub is intentional default behavior, not a runtime failure of
-  the root package.
+- The disabled stub is an intentional explicit-`GOEXPERIMENT=none` path, not a
+  runtime failure of the root package.
 
 ### `unquote.IntoBytes` limits
 

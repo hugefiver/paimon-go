@@ -2,6 +2,7 @@ package ast
 
 import (
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 )
@@ -138,6 +139,34 @@ func TestPreorderOutOfRangeFloatTolerated(t *testing.T) {
 	}
 	if !strings.Contains(sb.String(), "+Inf") {
 		t.Fatalf("Preorder(1e999) output = %q; want +Inf", sb.String())
+	}
+}
+
+// Preorder validates the closing delimiter of a skipped root container,
+// matching Sonic. Nested mismatches remain accepted for compatibility.
+func TestPreorderSkipRootDelimiterCompatibility(t *testing.T) {
+	for _, input := range []string{`[1}`, `{"a":1]`} {
+		if json.Valid([]byte(input)) {
+			t.Fatalf("encoding/json.Valid(%q) = true, want false", input)
+		}
+		err := Preorder(input, &skipContainerVisitor{}, nil)
+		var syntaxErr *SyntaxError
+		if !errors.As(err, &syntaxErr) {
+			t.Fatalf("Preorder(%q) error = %v, want *SyntaxError", input, err)
+		}
+	}
+
+	const nestedMismatch = `[{"a":1]]`
+	if json.Valid([]byte(nestedMismatch)) {
+		t.Fatalf("encoding/json.Valid(%q) = true, want false", nestedMismatch)
+	}
+	if err := Preorder(nestedMismatch, &skipContainerVisitor{}, nil); err != nil {
+		t.Fatalf("Preorder(%q) error = %v, want upstream-compatible acceptance", nestedMismatch, err)
+	}
+
+	const validControl = `[{"a":1}]`
+	if err := Preorder(validControl, &skipContainerVisitor{}, nil); err != nil {
+		t.Fatalf("Preorder(%q) error = %v", validControl, err)
 	}
 }
 
@@ -378,6 +407,21 @@ func TestLoadsReportsValueEndPosition(t *testing.T) {
 type collectVisitor struct {
 	sb *strings.Builder
 }
+
+type skipContainerVisitor struct{}
+
+func (*skipContainerVisitor) OnNull() error                    { return nil }
+func (*skipContainerVisitor) OnBool(bool) error                { return nil }
+func (*skipContainerVisitor) OnString(string) error            { return nil }
+func (*skipContainerVisitor) OnInt64(int64, json.Number) error { return nil }
+func (*skipContainerVisitor) OnFloat64(float64, json.Number) error {
+	return nil
+}
+func (*skipContainerVisitor) OnObjectBegin(int) error  { return VisitOPSkip }
+func (*skipContainerVisitor) OnObjectKey(string) error { return nil }
+func (*skipContainerVisitor) OnObjectEnd() error       { return nil }
+func (*skipContainerVisitor) OnArrayBegin(int) error   { return VisitOPSkip }
+func (*skipContainerVisitor) OnArrayEnd() error        { return nil }
 
 func (v *collectVisitor) OnNull() error           { v.sb.WriteString("null;"); return nil }
 func (v *collectVisitor) OnBool(b bool) error     { v.sb.WriteString("bool;"); return nil }

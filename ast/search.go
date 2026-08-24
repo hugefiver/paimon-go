@@ -38,17 +38,12 @@ func (s *Searcher) getByPath(path []interface{}, copyReturn bool) (Node, error) 
 	if s == nil {
 		return Node{}, ErrNotExist
 	}
-	if s.ValidateJSON {
-		if _, code := parseRawToNodeLocal(s.src); code != 0 {
-			return Node{}, code
-		}
-	}
 	if len(path) == 0 {
-		raw, code := firstValueRaw(s.src)
+		_, code := firstValueRaw(s.src)
 		if code != 0 {
 			return Node{}, code
 		}
-		return NewRaw(raw), nil
+		return NewRaw(s.src), nil
 	}
 	if node, status := getPathRaw(s.src, path); status != rawPathNoFast {
 		switch status {
@@ -130,7 +125,7 @@ func firstValueRaw(src string) (string, nativetypes.ParsingError) {
 		return "", nativetypes.ERR_MISMATCH
 	}
 	raw := src[start:end]
-	if !validRootRaw(raw) {
+	if !validScannedRootRaw(src, start, end) {
 		var fp vfastjson.Parser
 		_, err := fp.Parse(raw)
 		if err == nil {
@@ -265,7 +260,7 @@ func findObjectValueStartString(src string, start int, key string) (int, rawPath
 			}
 			return valueStart, rawPathFound
 		}
-		valueEnd, ok := scanValueEndString(src, valueStart, 0)
+		valueEnd, ok := scanPreTargetValueEndString(src, valueStart)
 		if !ok {
 			return 0, rawPathInvalid
 		}
@@ -301,7 +296,7 @@ func findArrayValueStartString(src string, start int, idx int) (int, rawPathStat
 		if cur == idx {
 			return i, rawPathFound
 		}
-		valueEnd, ok := scanValueEndString(src, i, 0)
+		valueEnd, ok := scanPreTargetValueEndString(src, i)
 		if !ok {
 			return 0, rawPathInvalid
 		}
@@ -325,6 +320,13 @@ func findArrayValueStartString(src string, start int, idx int) (int, rawPathStat
 // maxScanDepth mirrors Sonic's MAX_RECURSE limit (4096); fastjson's
 // MaxDepth of 300 would reject valid deep documents Sonic accepts.
 const maxScanDepth = 4096
+
+func scanPreTargetValueEndString(src string, start int) (int, bool) {
+	if start < len(src) && (src[start] == '{' || src[start] == '[') {
+		return scanContainerEnd(src, start)
+	}
+	return scanValueEndString(src, start, 0)
+}
 
 func scanValueEndString(src string, start int, depth int) (int, bool) {
 	if depth > maxScanDepth || start >= len(src) {
@@ -453,6 +455,9 @@ func scanNumberEndString(src string, start int) (int, bool) {
 	}
 	if i < len(src) && (src[i] == 'e' || src[i] == 'E') {
 		i++
+		if i < len(src) && isJSONNumberTerminator(src[i]) {
+			return i, true
+		}
 		if i < len(src) && (src[i] == '+' || src[i] == '-') {
 			i++
 		}
@@ -498,6 +503,24 @@ func validRootRaw(raw string) bool {
 		return false
 	}
 	return skipJSONSpaceString(raw, end) == len(raw)
+}
+
+// validScannedRootRaw preserves the source delimiter that made a bare
+// exponent scannable. Once sliced, that context is unavailable to
+// validRootRaw, so accept only that exact upstream-compatible exception.
+func validScannedRootRaw(src string, start int, end int) bool {
+	raw := src[start:end]
+	if validRootRaw(raw) {
+		return true
+	}
+	if len(raw) == 0 || end == len(src) || !isJSONNumberTerminator(src[end]) {
+		return false
+	}
+	last := raw[len(raw)-1]
+	if last != 'e' && last != 'E' {
+		return false
+	}
+	return validRootRaw(raw[:len(raw)-1])
 }
 
 func scanFirstValueEnd(src string, start int) (int, bool) {
@@ -587,6 +610,10 @@ func scanStringEnd(src string, start int) (int, bool) {
 
 func isJSONSpace(c byte) bool {
 	return c == ' ' || c == '\n' || c == '\r' || c == '\t'
+}
+
+func isJSONNumberTerminator(c byte) bool {
+	return isJSONSpace(c) || c == ',' || c == ']' || c == '}'
 }
 
 // Loads parses src as a single JSON value and returns it as an

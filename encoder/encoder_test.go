@@ -557,6 +557,27 @@ func TestOptionBitPositions(t *testing.T) {
 	}
 }
 
+func TestOptionToConfigSingleBitsStayIndependent(t *testing.T) {
+	tests := []struct {
+		name                              string
+		opts                              Options
+		wantSort, wantEscape, wantCompact bool
+	}{
+		{name: "SortMapKeys", opts: SortMapKeys, wantSort: true},
+		{name: "EscapeHTML", opts: EscapeHTML, wantEscape: true},
+		{name: "CompactMarshaler", opts: CompactMarshaler, wantCompact: true},
+		{name: "CompatibleWithStd", opts: CompatibleWithStd, wantSort: true, wantEscape: true, wantCompact: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := optionToConfig(tt.opts)
+			if cfg.SortMapKeys != tt.wantSort || cfg.EscapeHTML != tt.wantEscape || cfg.CompactMarshaler != tt.wantCompact {
+				t.Fatalf("optionToConfig(%v) = sort:%v escape:%v compact:%v; want sort:%v escape:%v compact:%v", tt.opts, cfg.SortMapKeys, cfg.EscapeHTML, cfg.CompactMarshaler, tt.wantSort, tt.wantEscape, tt.wantCompact)
+			}
+		})
+	}
+}
+
 func TestOptionToConfigMapping(t *testing.T) {
 	// Verify the mapping of Options to backend.Config fields.
 	cfg := optionToConfig(SortMapKeys)

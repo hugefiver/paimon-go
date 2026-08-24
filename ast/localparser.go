@@ -209,6 +209,9 @@ func (p *localParser) parseNumber() (string, nativetypes.ParsingError) {
 	}
 	if !p.atEnd() && (s[p.pos] == 'e' || s[p.pos] == 'E') {
 		p.pos++
+		if !p.atEnd() && isJSONNumberTerminator(s[p.pos]) {
+			return s[start:p.pos], 0
+		}
 		if !p.atEnd() && (s[p.pos] == '+' || s[p.pos] == '-') {
 			p.pos++
 		}

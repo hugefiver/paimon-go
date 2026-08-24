@@ -59,6 +59,10 @@ Remove-Item Env:GOEXPERIMENT -ErrorAction SilentlyContinue
 go test ./rootbench -bench=. -benchmem -run='^$'
 ```
 
-`stdjsonv2` requires both `GOEXPERIMENT=jsonv2` and a Go toolchain that provides `encoding/json/v2` plus `encoding/json/jsontext`. If the current toolchain does not include that experiment, only the root/default and upstream modes can run.
+The benchmark runner and manual command set `GOEXPERIMENT=jsonv2` explicitly
+for reproducibility. On the required Go 1.27 baseline, the default experiment
+set also selects the real backend. The toolchain must expose
+`encoding/json/v2` and `encoding/json/jsontext`. Explicit `GOEXPERIMENT=none`
+selects the stub and cannot run `localv2bench` as the real backend.
 
 The first run may create or update `go.sum` / `go.local.sum` files for the selected module file.

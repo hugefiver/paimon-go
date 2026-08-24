@@ -32,11 +32,10 @@ behavior for those raw entry points.
   the root package. Its exported types are aliases of the root types and its
   functions forward to the root implementation.
 - **`github.com/bytedance/sonic/stdjsonv2`**: an explicit experimental backend.
-  By default it is a disabled stub that compiles everywhere and returns
-  `ErrJSONv2ExperimentDisabled` from operational APIs. A real backend is built
-  only when the Go toolchain provides `encoding/json/v2` and
-  `encoding/json/jsontext` and tests/builds run with
-  `$env:GOEXPERIMENT = "jsonv2"`.
+  The required Go 1.27 default experiment set builds the real backend; explicit
+  `$env:GOEXPERIMENT = "jsonv2"` does too; explicit
+  `$env:GOEXPERIMENT = "none"` builds the deterministic disabled stub whose
+  operational APIs return `ErrJSONv2ExperimentDisabled`.
 
 `github.com/bytedance/sonic/loader` is out of scope for this replacement.
 
@@ -107,14 +106,15 @@ ok := sonicfast.Valid([]byte(`{"ok":true}`))
 _ = ok
 ```
 
-The `stdjsonv2` subpackage should be treated as opt-in and experimental:
+The `stdjsonv2` subpackage is experimental; callers that explicitly build with
+`GOEXPERIMENT=none` can detect the disabled stub:
 
 ```go
 import "github.com/bytedance/sonic/stdjsonv2"
 
 data, err := stdjsonv2.Marshal(map[string]bool{"ok": true})
 if err == stdjsonv2.ErrJSONv2ExperimentDisabled {
-    // Build or test without GOEXPERIMENT=jsonv2; use another backend.
+    // GOEXPERIMENT=none selected the deterministic stub; use another backend.
 }
 _ = data
 ```

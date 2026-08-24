@@ -4,6 +4,8 @@ package stdjsonv2
 
 import (
 	"bytes"
+	"encoding/json"
+	"errors"
 	"io"
 	"strings"
 	"testing"
@@ -83,6 +85,18 @@ func TestEncoderZeroProgressReturnsErrShortWrite(t *testing.T) {
 	}
 }
 
+type errorWriter struct{ err error }
+
+func (w errorWriter) Write([]byte) (int, error) { return 0, w.err }
+
+func TestEncoderPropagatesWriterError(t *testing.T) {
+	want := errors.New("write boom")
+	enc := ConfigDefault.NewEncoder(errorWriter{err: want})
+	if err := enc.Encode(map[string]int{"a": 1}); !errors.Is(err, want) {
+		t.Fatalf("Encode error = %v; want errors.Is(_, %v)", err, want)
+	}
+}
+
 // NoNullSliceOrMap defaults to false: nil slices/maps encode as null
 // (Sonic/encoding/json semantics), not as []/{}.
 func TestDefaultConfigEncodesNilCollectionsAsNull(t *testing.T) {
@@ -113,15 +127,55 @@ func TestDefaultConfigMatchesKeysCaseInsensitively(t *testing.T) {
 	}
 }
 
-// UseNumber+UseInt64 conflict panics like the root API (Sonic
-// compatibility documented in docs/compatibility.md).
-func TestUseNumberAndUseInt64ConflictPanics(t *testing.T) {
-	defer func() {
-		if recover() == nil {
-			t.Fatalf("Config{UseNumber,UseInt64}.Froze() did not panic")
-		}
-	}()
-	Config{UseNumber: true, UseInt64: true}.Froze()
+func TestUseNumberTakesPrecedenceOverUseInt64(t *testing.T) {
+	api := Config{UseNumber: true, UseInt64: true}.Froze()
+
+	var nested map[string]interface{}
+	if err := api.Unmarshal([]byte(`{"n":1,"a":[2]}`), &nested); err != nil {
+		t.Fatalf("Unmarshal error = %v", err)
+	}
+	array, ok := nested["a"].([]interface{})
+	if !ok || len(array) != 1 {
+		t.Fatalf("a = %v (%T), want one-element []interface{}", nested["a"], nested["a"])
+	}
+	if got, ok := nested["n"].(json.Number); !ok || got.String() != "1" {
+		t.Fatalf("nested.n = %v (%T), want json.Number(1)", nested["n"], nested["n"])
+	}
+	if got, ok := array[0].(json.Number); !ok || got.String() != "2" {
+		t.Fatalf("nested.a[0] = %v (%T), want json.Number(2)", array[0], array[0])
+	}
+
+	dec := api.NewDecoder(strings.NewReader(`1`))
+	var streamed interface{}
+	if err := dec.Decode(&streamed); err != nil {
+		t.Fatalf("stream Decode error = %v", err)
+	}
+	if got, ok := streamed.(json.Number); !ok || got.String() != "1" {
+		t.Fatalf("streamed = %v (%T), want json.Number(1)", streamed, streamed)
+	}
+}
+
+func TestDecoderUseNumberTakesPrecedenceOverFrozenUseInt64(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		cfg  Config
+	}{
+		{name: "use int64", cfg: Config{UseInt64: true}},
+		{name: "both modes", cfg: Config{UseNumber: true, UseInt64: true}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			dec := tt.cfg.Froze().NewDecoder(strings.NewReader(`{"n":1}`))
+			dec.UseNumber()
+
+			var got map[string]interface{}
+			if err := dec.Decode(&got); err != nil {
+				t.Fatalf("Decode error = %v", err)
+			}
+			if number, ok := got["n"].(json.Number); !ok || number.String() != "1" {
+				t.Fatalf("n = %v (%T), want json.Number(1)", got["n"], got["n"])
+			}
+		})
+	}
 }
 
 // Duplicate object names and invalid UTF-8 are valid JSON per RFC 8259

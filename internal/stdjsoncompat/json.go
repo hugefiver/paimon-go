@@ -6,6 +6,8 @@
 // The implementation honors the subset of backend.Config options that
 // encoding/json can control directly:
 //   - UseNumber                 -> json.Decoder.UseNumber
+//   - UseInt64                  -> UseNumber plus recursive conversion of
+//     interface-contained integers to int64
 //   - DisallowUnknownFields     -> json.Decoder.DisallowUnknownFields
 //   - EscapeHTML                -> json.Encoder.SetEscapeHTML
 //   - SortMapKeys               -> map key sorting via encoding/json
@@ -13,10 +15,10 @@
 //   - NoEncoderNewline          -> suppress trailing newline on streams
 //
 // Options that encoding/json cannot enforce (NoNullSliceOrMap,
-// CompactMarshaler, NoQuoteTextMarshaler, UseInt64 for nested values,
-// UseUnicodeErrors, CopyString, ValidateString, NoValidateJSONMarshaler,
-// NoValidateJSONSkip, EncodeNullForInfOrNan, CaseSensitive) are accepted
-// but have no effect here; later backends implement them.
+// CompactMarshaler, NoQuoteTextMarshaler, UseUnicodeErrors, CopyString,
+// ValidateString, NoValidateJSONMarshaler, NoValidateJSONSkip,
+// EncodeNullForInfOrNan, CaseSensitive) are accepted but have no effect here;
+// later backends implement them.
 package stdjsoncompat
 
 import (
@@ -28,14 +30,6 @@ import (
 	"github.com/bytedance/sonic/internal/backend"
 	"github.com/bytedance/sonic/internal/jsonconv"
 )
-
-const conflictingNumberModes = "can't set OptionUseInt64 and OptionUseNumber both!"
-
-func validateNumberModes(cfg backend.Config) {
-	if cfg.UseNumber && cfg.UseInt64 {
-		panic(conflictingNumberModes)
-	}
-}
 
 // Marshal serializes v under cfg. SortMapKeys is honored natively by
 // encoding/json.
@@ -58,38 +52,28 @@ func Marshal(v interface{}, cfg backend.Config) ([]byte, error) {
 	return out, nil
 }
 
-// MarshalIndent is like Marshal but applies a two-space-ish indent.
+// MarshalIndent is like Marshal but applies the caller's prefix and indent.
 func MarshalIndent(v interface{}, prefix, indent string, cfg backend.Config) ([]byte, error) {
-	b, err := json.MarshalIndent(v, prefix, indent)
-	if err != nil {
+	if cfg.EscapeHTML {
+		return json.MarshalIndent(v, prefix, indent)
+	}
+
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	enc.SetIndent(prefix, indent)
+	if err := enc.Encode(v); err != nil {
 		return nil, err
 	}
-	if !cfg.EscapeHTML {
-		// encoding/json.MarshalIndent always HTML-escapes. Re-encode through
-		// a buffer with escaping disabled. We can't preserve the caller's
-		// prefix/indent through Encoder, so we do a manual re-indent by
-		// re-marshalling then indenting the unescaped bytes.
-		var raw bytes.Buffer
-		enc := json.NewEncoder(&raw)
-		enc.SetEscapeHTML(false)
-		if err := enc.Encode(v); err != nil {
-			return nil, err
-		}
-		out := raw.Bytes()
-		if n := len(out); n > 0 && out[n-1] == '\n' {
-			out = out[:n-1]
-		}
-		// Re-indent using json.Indent (no HTML escaping happens here).
-		var ind bytes.Buffer
-		json.Indent(&ind, out, prefix, indent)
-		return ind.Bytes(), nil
+	out := buf.Bytes()
+	if n := len(out); n > 0 && out[n-1] == '\n' {
+		out = out[:n-1]
 	}
-	return b, nil
+	return out, nil
 }
 
 // Unmarshal parses data into v under cfg.
 func Unmarshal(data []byte, v interface{}, cfg backend.Config) error {
-	validateNumberModes(cfg)
 	data = normalizeUnmarshalInput(data)
 	if cfg.UseNumber || cfg.UseInt64 {
 		dec := json.NewDecoder(bytes.NewReader(data))
@@ -193,7 +177,6 @@ func NewEncoder(w io.Writer, cfg backend.Config) backend.StreamEncoder {
 
 // NewDecoder returns a streaming decoder reading from r under cfg.
 func NewDecoder(r io.Reader, cfg backend.Config) backend.StreamDecoder {
-	validateNumberModes(cfg)
 	dec := json.NewDecoder(r)
 	if cfg.UseNumber || cfg.UseInt64 {
 		dec.UseNumber()

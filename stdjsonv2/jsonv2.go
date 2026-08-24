@@ -8,8 +8,8 @@ package stdjsonv2
 
 import (
 	"bytes"
-	stdjson "encoding/json"
 	"encoding/json"
+	stdjson "encoding/json"
 	stdjsontext "encoding/json/jsontext"
 	jsonv2 "encoding/json/v2"
 	"errors"
@@ -20,14 +20,6 @@ import (
 	"github.com/bytedance/sonic/internal/jsonconv"
 )
 
-const conflictingNumberModes = "can't set OptionUseInt64 and OptionUseNumber both!"
-
-func validateNumberModes(cfg Config) {
-	if cfg.UseNumber && cfg.UseInt64 {
-		panic(conflictingNumberModes)
-	}
-}
-
 // ErrJSONv2ExperimentDisabled is declared for API symmetry with the
 // non-jsonv2 build. Under GOEXPERIMENT=jsonv2 it is never returned by any
 // operation; it exists so callers that reference the error continue to
@@ -37,7 +29,6 @@ var ErrJSONv2ExperimentDisabled = errors.New("stdjsonv2: GOEXPERIMENT=jsonv2 is 
 // froze returns the jsonv2-backed API. It is the build-specific
 // implementation of (Config).Froze declared in api.go.
 func froze(cfg Config) API {
-	validateNumberModes(cfg)
 	return &jsonv2API{
 		cfg:           cfg,
 		marshalOpts:   buildMarshalOptions(cfg),
@@ -177,7 +168,6 @@ func buildUnmarshalOptions(cfg Config) []jsonv2.Options {
 // expose a UseNumber knob on the v2 API). Otherwise we use jsonv2.Unmarshal
 // to honor the v2-specific options (RejectUnknownMembers, etc.).
 func decodeBytes(data []byte, val interface{}, cfg Config, opts []jsonv2.Options) error {
-	validateNumberModes(cfg)
 	if cfg.UseNumber || cfg.UseInt64 {
 		dec := json.NewDecoder(bytes.NewReader(data))
 		dec.UseNumber()
@@ -223,12 +213,12 @@ func rejectTrailingStdJSONData(dec *json.Decoder) error {
 // directly because jsontext.Flush silently drops short writes, which
 // would violate the documented io.ErrShortWrite retry contract.
 type jsonv2Encoder struct {
-	w          io.Writer
-	cfg        Config
-	escapeHTML bool
-	indent     string
+	w            io.Writer
+	cfg          Config
+	escapeHTML   bool
+	indent       string
 	indentPrefix string
-	noNewline  bool
+	noNewline    bool
 }
 
 // encodeOptions returns the jsonv2 options for one Encode call.
@@ -335,11 +325,9 @@ func (d *jsonv2Decoder) More() bool {
 }
 
 func (d *jsonv2Decoder) UseNumber() {
-	if d.cfg.UseInt64 {
-		panic(conflictingNumberModes)
-	}
 	d.useNumber = true
 	d.cfg.UseNumber = true
+	d.cfg.UseInt64 = false
 }
 
 // Compile-time interface satisfaction checks.

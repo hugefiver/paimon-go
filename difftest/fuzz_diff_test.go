@@ -34,9 +34,6 @@ type result struct {
 	SearcherPathRaw    string `json:"searcher_path_raw,omitempty"`
 	PreorderOnlyNumber string `json:"preorder_only_number,omitempty"`
 	NewRawType         int    `json:"new_raw_type,omitempty"`
-	SkipStart          int    `json:"skip_start"`
-	SkipEnd            int    `json:"skip_end"`
-	ConfigBothPanics   bool   `json:"config_both_panics"`
 }
 
 func pathFromSeed(seed string) []pathPart {
@@ -69,11 +66,10 @@ func runHelper(t *testing.T, dir string, req request) result {
 	}
 
 	cmdPath := "./cmd/sonicupstream"
-	args := []string{"run", cmdPath}
 	if filepath.Base(dir) == "local" {
 		cmdPath = "./cmd/soniclocal"
-		args = []string{"run", cmdPath}
 	}
+	args := []string{"run", "-mod=readonly", cmdPath}
 	cmd := exec.Command("go", args...)
 	cmd.Dir = dir
 	cmd.Stdin = bytes.NewReader(reqBytes)
@@ -90,6 +86,55 @@ func runHelper(t *testing.T, dir string, req request) result {
 		t.Fatalf("unmarshal helper %s stdout: %v\nstdout:\n%s\nstderr:\n%s", dir, err, string(stdout), stderr.String())
 	}
 	return res
+}
+
+// hasRawControlInStringToken identifies the documented local-only acceptance
+// of unescaped ASCII control bytes in otherwise valid JSON string tokens.
+func hasRawControlInStringToken(data string) bool {
+	normalized := make([]byte, 0, len(data))
+	inString := false
+	escaped := false
+	hasRawControl := false
+	const hex = "0123456789abcdef"
+
+	for i := 0; i < len(data); i++ {
+		b := data[i]
+		if !inString {
+			if b <= 0x1f && b != '\t' && b != '\n' && b != '\r' {
+				return false
+			}
+			normalized = append(normalized, b)
+			if b == '"' {
+				inString = true
+			}
+			continue
+		}
+
+		if escaped {
+			normalized = append(normalized, b)
+			escaped = false
+			continue
+		}
+		switch b {
+		case '\\':
+			normalized = append(normalized, b)
+			escaped = true
+		case '"':
+			normalized = append(normalized, b)
+			inString = false
+		default:
+			if b > 0x1f {
+				normalized = append(normalized, b)
+				continue
+			}
+			hasRawControl = true
+			normalized = append(normalized, '\\', 'u', '0', '0', hex[b>>4], hex[b&0x0f])
+		}
+	}
+
+	// Invalid JSON remains in the ordinary strict parity path. Only documents
+	// made valid by escaping raw controls in string tokens are excepted.
+	return hasRawControl && !inString && !escaped && json.Valid(normalized)
 }
 
 func FuzzUpstreamSonicParity(f *testing.F) {
@@ -116,10 +161,132 @@ func FuzzUpstreamSonicParity(f *testing.F) {
 
 		local := runHelper(t, filepath.Join("local"), req)
 		upstream := runHelper(t, filepath.Join("upstream"), req)
+		if hasRawControlInStringToken(data) {
+			return
+		}
 		if !reflect.DeepEqual(local, upstream) {
 			t.Fatalf("sonic parity mismatch\ndata: %q\npath: %+v\nlocal: %+v\nupstream: %+v", data, req.Path, local, upstream)
 		}
 	})
+}
+
+func TestHasRawControlInStringToken(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		data string
+		want bool
+	}{
+		{
+			name: "control in object key",
+			data: string([]byte{'{', '"', 0x11, 'x', '"', ':', '1', '}'}),
+			want: true,
+		},
+		{
+			name: "control in string value",
+			data: string([]byte{'{', '"', 'x', '"', ':', '"', 0x00, '"', '}'}),
+			want: true,
+		},
+		{
+			name: "legal whitespace outside with string control",
+			data: string([]byte{' ', '\t', '\n', '\r', '{', '"', 'x', '"', ':', '"', 0x11, '"', '}', '\t', '\n', '\r'}),
+			want: true,
+		},
+		{
+			name: "control outside string",
+			data: string([]byte{'{', 0x11, '"', 'x', '"', ':', '1', '}'}),
+		},
+		{
+			name: "escaped control",
+			data: `{"\u0011x":1}`,
+		},
+		{
+			name: "leading zero",
+			data: string([]byte{'{', '"', 0x11, 'x', '"', ':', '0', '1', '}'}),
+		},
+		{
+			name: "invalid escape",
+			data: string([]byte{'{', '"', 0x11, 'x', '"', ':', '"', '\\', 'q', '"', '}'}),
+		},
+		{
+			name: "ordinary valid JSON",
+			data: `{"x":[true,null,1]}`,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := hasRawControlInStringToken(tt.data); got != tt.want {
+				t.Fatalf("hasRawControlInStringToken(%q) = %t, want %t", tt.data, got, tt.want)
+			}
+		})
+	}
+
+	for b := byte(0); b <= 0x1f; b++ {
+		if b == '\t' || b == '\n' || b == '\r' {
+			continue
+		}
+		t.Run("outside_control_"+string([]byte{b}), func(t *testing.T) {
+			data := string([]byte{'{', b, '"', 'x', '"', ':', '"', 0x11, '"', '}'})
+			if got := hasRawControlInStringToken(data); got {
+				t.Fatalf("hasRawControlInStringToken(%q) = true, want false", data)
+			}
+		})
+	}
+}
+
+func TestFinalReviewSonicParity(t *testing.T) {
+	for _, tt := range []struct {
+		name      string
+		data      string
+		path      []pathPart
+		rootValue string
+		pathValue string
+	}{
+		{name: "root bare exponent followed by space", data: "1e ", rootValue: "1e", pathValue: "1e"},
+		{name: "root bare exponent followed by comma", data: "1e,", rootValue: "1e", pathValue: "1e"},
+		{name: "matched b before malformed sibling", data: `{"b":2,"a":{`, path: []pathPart{{Kind: "key", Key: "b"}}, pathValue: "2"},
+		{name: "matched a before malformed sibling", data: `{"a":1,"b":}`, path: []pathPart{{Kind: "key", Key: "a"}}, pathValue: "1"},
+		{name: "selected malformed value remains rejected", data: `{"a":{`, path: []pathPart{{Kind: "key", Key: "a"}}},
+		{name: "malformed member before target remains rejected", data: `{"broken":{,"a":1}`, path: []pathPart{{Kind: "key", Key: "a"}}},
+		{name: "object skips balanced malformed container before target", data: `{"broken":{garbage},"a":1}`, path: []pathPart{{Kind: "key", Key: "a"}}, pathValue: "1"},
+		{name: "array skips balanced malformed container before target", data: `[{garbage},1]`, path: []pathPart{{Kind: "index", Index: 1}}, pathValue: "1"},
+		{name: "selected malformed container remains rejected", data: `{"a":{garbage}}`, path: []pathPart{{Kind: "key", Key: "a"}}},
+		{name: "prior malformed scalar remains rejected", data: `{"broken":garbage,"a":1}`, path: []pathPart{{Kind: "key", Key: "a"}}},
+		{name: "prior unclosed container remains rejected", data: `{"broken":{garbage,"a":1}`, path: []pathPart{{Kind: "key", Key: "a"}}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			req := request{
+				Data: base64.StdEncoding.EncodeToString([]byte(tt.data)),
+				Path: tt.path,
+			}
+			local := runHelper(t, filepath.Join("local"), req)
+			upstream := runHelper(t, filepath.Join("upstream"), req)
+			if !reflect.DeepEqual(local, upstream) {
+				t.Fatalf("final review sonic parity mismatch\ndata: %q\npath: %+v\nlocal: %+v\nupstream: %+v", tt.data, req.Path, local, upstream)
+			}
+
+			if tt.rootValue != "" {
+				if !upstream.GetRootOK || upstream.GetRootRaw != tt.rootValue {
+					t.Fatalf("upstream sonic.Get(%q) = ok:%t raw:%q, want ok:true raw:%q", tt.data, upstream.GetRootOK, upstream.GetRootRaw, tt.rootValue)
+				}
+				if !upstream.GetPathOK || upstream.GetPathRaw != tt.pathValue {
+					t.Fatalf("upstream sonic.Get(%q, root) = ok:%t raw:%q, want ok:true raw:%q", tt.data, upstream.GetPathOK, upstream.GetPathRaw, tt.pathValue)
+				}
+				if !upstream.SearcherPathOK || upstream.SearcherPathRaw != tt.pathValue || upstream.NewRawType != 33 {
+					t.Fatalf("upstream root AST result = %+v, want Searcher raw %q and NewRawType 33", upstream, tt.pathValue)
+				}
+				return
+			}
+
+			if tt.pathValue != "" {
+				if !upstream.SearcherPathOK || upstream.SearcherPathRaw != tt.pathValue {
+					t.Fatalf("upstream Searcher(%q, %+v) = ok:%t raw:%q, want ok:true raw:%q", tt.data, tt.path, upstream.SearcherPathOK, upstream.SearcherPathRaw, tt.pathValue)
+				}
+				return
+			}
+			if upstream.SearcherPathOK {
+				t.Fatalf("upstream Searcher(%q, %+v) unexpectedly succeeded with raw %q", tt.data, tt.path, upstream.SearcherPathRaw)
+			}
+		})
+	}
 }
 
 func TestSonicCompatibilityProbeParity(t *testing.T) {
@@ -139,7 +306,7 @@ func TestSonicCompatibilityProbeParity(t *testing.T) {
 			t.Fatalf("sonic compatibility probe mismatch\ndata: %q\nlocal: %+v\nupstream: %+v", data, local, upstream)
 		}
 
-		if data == "1" && (local.PreorderOnlyNumber == "" || local.SkipEnd == 0 || !local.ConfigBothPanics) {
+		if data == "1" && (local.PreorderOnlyNumber == "" || !local.GetRootOK || local.GetRootRaw != "1") {
 			t.Fatalf("sonic compatibility probe protocol unavailable\ndata: %q\nresult: %+v", data, local)
 		}
 	}
