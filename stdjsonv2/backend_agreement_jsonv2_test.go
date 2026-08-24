@@ -1,12 +1,13 @@
 //go:build goexperiment.jsonv2
 
-package stdjsonv2
+package stdjsonv2_test
 
 import (
 	"encoding/json"
 	"testing"
 
 	root "github.com/bytedance/sonic"
+	"github.com/bytedance/sonic/stdjsonv2"
 )
 
 // TestBackendAgreementMarshal compares the root sonic Marshal with the
@@ -32,7 +33,7 @@ func TestBackendAgreementMarshal(t *testing.T) {
 		if err != nil {
 			t.Fatalf("root Marshal error: %v (val=%v)", err, v)
 		}
-		v2B, err := Marshal(v)
+		v2B, err := stdjsonv2.Marshal(v)
 		if err != nil {
 			t.Fatalf("stdjsonv2 Marshal error: %v (val=%v)", err, v)
 		}
@@ -71,7 +72,7 @@ func TestBackendAgreementValid(t *testing.T) {
 	}
 	for _, data := range cases {
 		gotRoot := root.Valid(data)
-		gotV2 := Valid(data)
+		gotV2 := stdjsonv2.Valid(data)
 		if gotRoot != gotV2 {
 			t.Fatalf("Valid mismatch: root=%v stdjsonv2=%v (data=%q)", gotRoot, gotV2, data)
 		}
@@ -94,7 +95,7 @@ func TestBackendAgreementUnmarshal(t *testing.T) {
 		if err := root.Unmarshal([]byte(src), &rootOut); err != nil {
 			t.Fatalf("root Unmarshal error: %v (src=%q)", err, src)
 		}
-		if err := Unmarshal([]byte(src), &v2Out); err != nil {
+		if err := stdjsonv2.Unmarshal([]byte(src), &v2Out); err != nil {
 			t.Fatalf("stdjsonv2 Unmarshal error: %v (src=%q)", err, src)
 		}
 		if !equalJSON(rootOut, v2Out) {

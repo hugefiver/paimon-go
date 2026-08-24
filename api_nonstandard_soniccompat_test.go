@@ -1,4 +1,4 @@
-//go:build !sonic_stdjson
+//go:build !sonic_stdjson && !sonic_jsonv2
 
 package sonic
 

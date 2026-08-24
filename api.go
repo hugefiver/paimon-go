@@ -120,9 +120,10 @@ type api struct {
 // Froze freezes the configuration into an immutable API instance. The
 // returned API honors every field of the originating Config.
 func (cfg Config) Froze() API {
+	normalized := cfg.toBackend()
 	return &api{
 		cfg:  cfg,
-		bknd: defaultBackend{},
+		bknd: newBackend(normalized),
 	}
 }
 
@@ -289,28 +290,26 @@ func ValidString(data string) bool {
 	return Valid([]byte(data))
 }
 
-// Get resolves path against data and returns the matching AST node. The
-// lookup uses the fastjson searcher; data is not validated beyond what
-// the search itself requires.
+// Get resolves path against data and returns the matching AST node using
+// the build-selected searcher.
 func Get(data []byte, path ...interface{}) (ast.Node, error) {
-	return fastjsoncompat.Get(data, ast.SearchOptions{}, path...)
+	return selectedGet(data, ast.SearchOptions{}, path...)
 }
 
 // GetFromString is the string-input form of Get.
 func GetFromString(data string, path ...interface{}) (ast.Node, error) {
-	return Get([]byte(data), path...)
+	return selectedGet([]byte(data), ast.SearchOptions{}, path...)
 }
 
 // GetCopyFromString is like GetFromString but returns a node that is safe
-// to retain. The ast searcher already returns owning nodes, so this is
-// equivalent to GetFromString today.
+// to retain.
 func GetCopyFromString(data string, path ...interface{}) (ast.Node, error) {
-	return fastjsoncompat.Get([]byte(data), ast.SearchOptions{CopyReturn: true}, path...)
+	return selectedGet([]byte(data), ast.SearchOptions{CopyReturn: true}, path...)
 }
 
 // GetWithOptions resolves path with explicit search options.
 func GetWithOptions(data []byte, opts ast.SearchOptions, path ...interface{}) (ast.Node, error) {
-	return fastjsoncompat.Get(data, opts, path...)
+	return selectedGet(data, opts, path...)
 }
 
 // Pretouch precompiles the given type. In this phase it is a no-op that

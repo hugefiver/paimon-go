@@ -14,6 +14,8 @@ After replacing, code importing `github.com/bytedance/sonic` and the covered
 subpackages continues to compile against the same public API surface, subject
 to the behavioral differences below.
 
+The intended source-publication location is https://github.com/hugefiver/paimon-go, but it is currently empty and is not an installable source. Consumers currently use a local-directory replace to an existing checkout; clone instructions become valid only after separately authorized source publication, and the module directive remains github.com/bytedance/sonic.
+
 ## API coverage and scope
 
 The compatibility target is Sonic `v1.15.2` for these packages and surfaces:
@@ -36,7 +38,23 @@ implemented.
 
 ## Backend model
 
-### Root / default backend
+| Project tags | Effective experiment | Root result |
+|---|---|---|
+| none | ambient Go 1.27 | Sonic-compatible default |
+| `sonic_stdjson` | ambient or `none` | strict raw JSON plus the existing v1 reflection path |
+| `sonic_jsonv2` | ambient Go 1.27 or explicit `jsonv2` | complete root high-frequency API uses JSON v2 |
+| `sonic_jsonv2` | explicit `none` | compile failure; no fallback |
+| `sonic_stdjson sonic_jsonv2` | any | compile failure |
+| none | explicit `jsonv2` | Sonic-compatible default; experiment alone does not select root JSON v2 |
+
+`APIKind == UseSonicJSON` in every valid build. All 16 root `Config` fields are
+forwarded when the API is frozen. Currently supported JSON v2 semantics include
+`EscapeHTML`, `SortMapKeys`, `NoNullSliceOrMap`, `UseInt64`, `UseNumber`
+precedence, `DisallowUnknownFields`, `NoEncoderNewline`, and `CaseSensitive`.
+Sonic-native flags remain accepted for source compatibility even when JSON v2
+cannot provide their complete native/JIT semantics.
+
+### Root build-selected backend
 
 The root package chooses raw JSON behavior per feature according to the project
 policy: support for standard JSON must not be worse than upstream Sonic; when
@@ -50,15 +68,20 @@ needed.
   for the current hot-path benchmarks while still accepting standard JSON.
 - Build with `-tags sonic_stdjson` to force strict standard JSON behavior for
   these raw JSON entry points.
+- Build with `-tags sonic_jsonv2` to route the complete root high-frequency API
+  through JSON v2. This tag requires an effective `goexperiment.jsonv2` and is
+  mutually exclusive with `sonic_stdjson`.
 - AST parsing and raw JSON nodes remain Sonic-shaped APIs and may still use
   `github.com/valyala/fastjson`-oriented helpers internally.
-- `Marshal`, `MarshalString`, `MarshalIndent`, `Unmarshal`,
-  `UnmarshalString`, `NewEncoder`, and `NewDecoder` for arbitrary Go values
-  use the standard `encoding/json` v1 reflection fallback.
+- Without `sonic_jsonv2`, `Marshal`, `MarshalString`, `MarshalIndent`,
+  `Unmarshal`, `UnmarshalString`, `NewEncoder`, and `NewDecoder` for arbitrary
+  Go values use the standard `encoding/json` v1 reflection fallback.
 
-This preserves the most commonly used Sonic API surface without porting
-Sonic's native/JIT implementation. It also means struct-level reflection
-behavior follows `encoding/json` v1 more closely than upstream Sonic.
+The default and `sonic_stdjson` builds therefore preserve the most commonly
+used Sonic API surface without porting Sonic's native/JIT implementation, and
+their struct-level reflection behavior follows `encoding/json` v1 more closely
+than upstream Sonic. The `sonic_jsonv2` build instead follows the JSON v2
+adapter described above.
 
 ### `fastjson` subpackage
 
@@ -66,7 +89,7 @@ behavior follows `encoding/json` v1 more closely than upstream Sonic.
 package. Its exported types are aliases of root package types, and its
 functions forward to root functions. It exists so source code that explicitly
 imports Sonic's `fastjson` path continues to compile and sees the same
-behavior as the root/default backend.
+behavior as the root backend selected by the current build tags.
 
 ### `stdjsonv2` subpackage
 
@@ -78,6 +101,8 @@ behavior as the root/default backend.
 - Explicit `$env:GOEXPERIMENT = "none"` selects the deterministic disabled
   stub: operational APIs return `ErrJSONv2ExperimentDisabled`; `Valid*`
   returns `false`; stream APIs are present but fail/no-op consistently.
+
+The fastjson and stdjsonv2 subpackages are retained for existing-source compatibility only; replace plus root build tags are the backend-selection workflow. The standalone `stdjsonv2` disabled stub remains available, but root `sonic_jsonv2` fails at compile time instead.
 
 ## Known behavioral differences
 
@@ -167,8 +192,8 @@ that includes jsonv2. Known limitations include:
 
 Performance parity is not promised. Upstream Sonic uses native/JIT codecs;
 this replacement delegates raw JSON operations to fastjson-oriented helpers and
-general Go value reflection to `encoding/json` v1 (or jsonv2 in the explicit
-experimental subpackage). The `bench/` module provides reproducible comparison
+general Go value reflection to `encoding/json` v1 (or JSON v2 under the root
+`sonic_jsonv2` tag). The `bench/` module provides reproducible comparison
 commands only.
 
 Only the minimal `internal/native/types` symbols needed by exported signatures

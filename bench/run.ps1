@@ -17,56 +17,75 @@ function Invoke-Bench {
     }
 }
 
+$hadExperiment = Test-Path Env:GOEXPERIMENT
 $oldExperiment = $env:GOEXPERIMENT
+$hadToolchain = Test-Path Env:GOTOOLCHAIN
+$oldToolchain = $env:GOTOOLCHAIN
 
 Push-Location $scriptDir
 try {
     Invoke-Bench -Label "=== local root sonic/default ===" -Arguments @(
         "test",
+        "-mod=readonly",
         "-modfile=go.local.mod",
-        "./rootbench",
+        "-run=^$",
         "-bench=.",
         "-benchmem",
-        "-run=^$"
+        "-count=3",
+        "./rootbench"
     )
 
     Invoke-Bench -Label "=== local root stdjson tag ===" -Arguments @(
         "test",
+        "-mod=readonly",
         "-modfile=go.local.mod",
         "-tags=sonic_stdjson",
-        "./rootbench",
+        "-run=^$",
         "-bench=.",
         "-benchmem",
-        "-run=^$"
+        "-count=3",
+        "./rootbench"
     )
 
     $env:GOEXPERIMENT = "jsonv2"
-    Invoke-Bench -Label "=== local stdjsonv2 ===" -Arguments @(
+    Invoke-Bench -Label "=== local root jsonv2 tag ===" -Arguments @(
         "test",
+        "-mod=readonly",
         "-modfile=go.local.mod",
-        "./localv2bench",
+        "-tags=sonic_jsonv2",
+        "-run=^$",
         "-bench=.",
         "-benchmem",
-        "-run=^$"
+        "-count=3",
+        "./rootbench"
     )
 
-    if ($null -eq $oldExperiment) {
-        Remove-Item Env:GOEXPERIMENT -ErrorAction SilentlyContinue
-    } else {
+    if ($hadExperiment) {
         $env:GOEXPERIMENT = $oldExperiment
+    } else {
+        Remove-Item Env:GOEXPERIMENT -ErrorAction SilentlyContinue
     }
-    Invoke-Bench -Label "=== upstream sonic v1.15.2 ===" -Arguments @(
+    $env:GOTOOLCHAIN = "go1.26.7"
+    Remove-Item Env:GOEXPERIMENT -ErrorAction SilentlyContinue
+    Invoke-Bench -Label "=== upstream sonic v1.15.2 / Go 1.26.7 ===" -Arguments @(
         "test",
-        "./rootbench",
+        "-mod=readonly",
+        "-run=^$",
         "-bench=.",
         "-benchmem",
-        "-run=^$"
+        "-count=3",
+        "./rootbench"
     )
 } finally {
-    if ($null -eq $oldExperiment) {
-        Remove-Item Env:GOEXPERIMENT -ErrorAction SilentlyContinue
-    } else {
+    if ($hadExperiment) {
         $env:GOEXPERIMENT = $oldExperiment
+    } else {
+        Remove-Item Env:GOEXPERIMENT -ErrorAction SilentlyContinue
+    }
+    if ($hadToolchain) {
+        $env:GOTOOLCHAIN = $oldToolchain
+    } else {
+        Remove-Item Env:GOTOOLCHAIN -ErrorAction SilentlyContinue
     }
     Pop-Location
 }
