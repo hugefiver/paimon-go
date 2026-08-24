@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -11,6 +12,10 @@ import (
 	"github.com/bytedance/sonic"
 	"github.com/bytedance/sonic/ast"
 )
+
+const maxRequestBytes = 1 << 20
+
+var errRequestTooLarge = errors.New("helper request exceeds 1 MiB")
 
 type pathPart struct {
 	Kind  string `json:"kind"`
@@ -47,13 +52,8 @@ func main() {
 }
 
 func run() result {
-	var req request
-	input, err := io.ReadAll(os.Stdin)
+	req, err := readRequest(os.Stdin)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "read stdin: %v\n", err)
-		os.Exit(1)
-	}
-	if err := json.Unmarshal(input, &req); err != nil {
 		return result{}
 	}
 	data, err := base64.StdEncoding.DecodeString(req.Data)
@@ -96,6 +96,21 @@ func run() result {
 	res.NewRawType = int(ast.NewRaw(string(data)).Type())
 
 	return res
+}
+
+func readRequest(r io.Reader) (request, error) {
+	input, err := io.ReadAll(io.LimitReader(r, maxRequestBytes+1))
+	if err != nil {
+		return request{}, err
+	}
+	if len(input) > maxRequestBytes {
+		return request{}, errRequestTooLarge
+	}
+	var req request
+	if err := json.Unmarshal(input, &req); err != nil {
+		return request{}, err
+	}
+	return req, nil
 }
 
 type recordingVisitor struct {

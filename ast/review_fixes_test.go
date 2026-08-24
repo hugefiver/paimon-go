@@ -3,8 +3,13 @@ package ast
 import (
 	"encoding/json"
 	"errors"
+	"math"
+	"reflect"
+	"strconv"
 	"strings"
 	"testing"
+
+	nativetypes "github.com/bytedance/sonic/internal/native/types"
 )
 
 // Regression tests for issues found in the full-codebase review.
@@ -214,6 +219,43 @@ func TestErrorNodePropagatesThroughSerialization(t *testing.T) {
 	}
 }
 
+// Nested V_ANY values must propagate their encoding/json failures instead of
+// silently becoming null while their containing node is serialized.
+func TestNestedAnyMarshalErrorPropagatesThroughSerialization(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		node Node
+	}{
+		{
+			name: "array",
+			node: NewArray([]Node{NewAny(make(chan int))}),
+		},
+		{
+			name: "object",
+			node: NewObject([]Pair{NewPair("value", NewAny(make(chan int)))}),
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := tt.node.Raw(); err == nil {
+				t.Fatal("Raw() error = nil, want unsupported chan type error")
+			} else {
+				var unsupported *json.UnsupportedTypeError
+				if !errors.As(err, &unsupported) || unsupported.Type.Kind() != reflect.Chan {
+					t.Fatalf("Raw() error = %T %v, want json.UnsupportedTypeError for chan", err, err)
+				}
+			}
+			if _, err := tt.node.MarshalJSON(); err == nil {
+				t.Fatal("MarshalJSON() error = nil, want unsupported chan type error")
+			} else {
+				var unsupported *json.UnsupportedTypeError
+				if !errors.As(err, &unsupported) || unsupported.Type.Kind() != reflect.Chan {
+					t.Fatalf("MarshalJSON() error = %T %v, want json.UnsupportedTypeError for chan", err, err)
+				}
+			}
+		})
+	}
+}
+
 // Non-strict conversions follow Sonic's wider type dispatch.
 func TestNonStrictConversionsMatchSonic(t *testing.T) {
 	num1 := NewRaw("1")
@@ -290,6 +332,76 @@ func TestNewAnyReportsVAny(t *testing.T) {
 	n := NewAny(42)
 	if n.Type() != V_ANY {
 		t.Fatalf("NewAny(42).Type() = %d; want %d (V_ANY)", n.Type(), V_ANY)
+	}
+}
+
+func TestIteratorObservesNodeMutations(t *testing.T) {
+	t.Run("array", func(t *testing.T) {
+		array := NewArray([]Node{NewNumber("1")})
+		iterator, err := array.Values()
+		if err != nil {
+			t.Fatalf("Values() error = %v", err)
+		}
+		if overwritten, err := array.SetByIndex(0, NewNumber("2")); err != nil || !overwritten {
+			t.Fatalf("SetByIndex(0) = %v, %v; want true, nil", overwritten, err)
+		}
+		if err := array.Add(NewNumber("3")); err != nil {
+			t.Fatalf("Add(3) error = %v", err)
+		}
+		if got := iterator.Len(); got != 2 {
+			t.Fatalf("iterator.Len() = %d; want 2 after mutation", got)
+		}
+
+		for _, want := range []int64{2, 3} {
+			var child Node
+			if !iterator.Next(&child) {
+				t.Fatalf("Next() = false; want child %d", want)
+			}
+			if got, err := child.Int64(); err != nil || got != want {
+				t.Fatalf("Next() child = %d, %v; want %d, nil", got, err, want)
+			}
+		}
+		if iterator.HasNext() {
+			t.Fatal("HasNext() = true after consuming mutated array")
+		}
+	})
+
+	t.Run("object", func(t *testing.T) {
+		object := NewObject([]Pair{NewPair("one", NewNumber("1"))})
+		iterator, err := object.Properties()
+		if err != nil {
+			t.Fatalf("Properties() error = %v", err)
+		}
+		if overwritten, err := object.Set("two", NewNumber("2")); err != nil || overwritten {
+			t.Fatalf("Set(two) = %v, %v; want false, nil", overwritten, err)
+		}
+		if got := iterator.Len(); got != 2 {
+			t.Fatalf("iterator.Len() = %d; want 2 after mutation", got)
+		}
+		if !iterator.HasNext() {
+			t.Fatal("HasNext() = false after adding an object property")
+		}
+
+		var first, second Pair
+		if !iterator.Next(&first) || first.Key != "one" {
+			t.Fatalf("first Next() = %#v; want pair with key one", first)
+		}
+		if !iterator.Next(&second) || second.Key != "two" {
+			t.Fatalf("second Next() = %#v; want newly added pair with key two", second)
+		}
+		if got, err := second.Value.Int64(); err != nil || got != 2 {
+			t.Fatalf("new pair value = %d, %v; want 2, nil", got, err)
+		}
+	})
+}
+
+func TestSequenceString(t *testing.T) {
+	if got, want := (Sequence{Index: 2}).String(), `Sequence(2, "")`; got != want {
+		t.Fatalf("Sequence{Index: 2}.String() = %q; want %q", got, want)
+	}
+	key := "name"
+	if got, want := (Sequence{Index: 3, Key: &key}).String(), `Sequence(3, "name")`; got != want {
+		t.Fatalf("Sequence{Index: 3, Key: &key}.String() = %q; want %q", got, want)
 	}
 }
 
@@ -400,6 +512,499 @@ func TestLoadsReportsValueEndPosition(t *testing.T) {
 	}
 	if pos != 7 {
 		t.Fatalf("Loads pos = %d; want 7", pos)
+	}
+}
+
+func TestErrorNodeForEachPropagatesWithoutCallback(t *testing.T) {
+	n := NewRaw("{")
+	called := false
+	if err := n.ForEach(func(Sequence, *Node) bool {
+		called = true
+		return true
+	}); err == nil {
+		t.Fatal("ForEach(V_ERROR) error = nil")
+	}
+	if called {
+		t.Fatal("ForEach(V_ERROR) invoked callback")
+	}
+}
+
+func TestGetIndexUnsupportedAndMissingSemantics(t *testing.T) {
+	scalar := NewString("sonic")
+	for _, tt := range []struct {
+		name string
+		node *Node
+	}{
+		{name: "Get", node: scalar.Get("k")},
+		{name: "Index", node: scalar.Index(0)},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.node == nil || tt.node.Type() != V_ERROR {
+				t.Fatalf("scalar.%s result = %#v, want V_ERROR node", tt.name, tt.node)
+			}
+			if err := tt.node.Check(); !errors.Is(err, ErrUnsupportType) {
+				t.Fatalf("scalar.%s Check() = %v, want ErrUnsupportType", tt.name, err)
+			}
+		})
+	}
+
+	object := NewObject([]Pair{NewPair("present", NewNumber("1"))})
+	if got := object.Get("missing"); got != nil {
+		t.Fatalf("missing object Get = %#v, want nil", got)
+	}
+
+	array := NewArray([]Node{NewNumber("1")})
+	if got := array.Index(1); got != nil {
+		t.Fatalf("positive out-of-range array Index = %#v, want nil", got)
+	}
+	if got := object.Index(1); got == nil || got.Type() != V_ERROR {
+		t.Fatalf("positive out-of-range object Index = %#v, want V_ERROR", got)
+	} else if err := got.Check(); !errors.Is(err, ErrNotExist) {
+		t.Fatalf("positive out-of-range object Index Check() = %v, want ErrNotExist", err)
+	} else if got.Error() != "value not exists" {
+		t.Fatalf("positive out-of-range object Index Error() = %q, want value not exists", got.Error())
+	}
+	if got := ErrNotExist.Error(); got != "value not exists" {
+		t.Fatalf("ErrNotExist.Error() = %q, want value not exists", got)
+	}
+}
+
+func TestCapMatchesSonicContract(t *testing.T) {
+	var none Node
+	if got, err := none.Cap(); err != nil || got != 0 {
+		t.Fatalf("V_NONE Cap() = %d, %v; want 0, nil", got, err)
+	}
+	null := NewNull()
+	if got, err := null.Cap(); err != nil || got != 0 {
+		t.Fatalf("V_NULL Cap() = %d, %v; want 0, nil", got, err)
+	}
+
+	array := Node{typ: V_ARRAY, exists: true, loaded: true, arr: make([]Node, 1, 4)}
+	if got, err := array.Cap(); err != nil || got != 4 {
+		t.Fatalf("array Cap() = %d, %v; want 4, nil", got, err)
+	}
+	object := Node{typ: V_OBJECT, exists: true, loaded: true, obj: make([]Pair, 1, 3)}
+	if got, err := object.Cap(); err != nil || got != 3 {
+		t.Fatalf("object Cap() = %d, %v; want 3, nil", got, err)
+	}
+
+	for _, tt := range []struct {
+		name string
+		node Node
+	}{
+		{name: "string", node: NewString("sonic")},
+		{name: "number", node: NewNumber("1")},
+		{name: "bool", node: NewBool(true)},
+		{name: "V_ANY", node: NewAny(1)},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if got, err := tt.node.Cap(); got != 0 || !errors.Is(err, ErrUnsupportType) {
+				t.Fatalf("%s Cap() = %d, %v; want 0, ErrUnsupportType", tt.name, got, err)
+			}
+		})
+	}
+
+	var nilNode *Node
+	if got, err := nilNode.Cap(); got != 0 || !errors.Is(err, ErrNotExist) {
+		t.Fatalf("nil Cap() = %d, %v; want 0, ErrNotExist", got, err)
+	}
+}
+
+func TestNewAnyPreservesOriginalValues(t *testing.T) {
+	nilAny := NewAny(nil)
+	if nilAny.Type() != V_ANY {
+		t.Fatalf("NewAny(nil).Type() = %d, want V_ANY", nilAny.Type())
+	}
+	if got, err := nilAny.Interface(); err != nil || got != nil {
+		t.Fatalf("NewAny(nil).Interface() = %#v, %v; want nil, nil", got, err)
+	}
+
+	mapValue := map[string]int{"initial": 1}
+	mapAny := NewAny(mapValue)
+	mapValue["from-source"] = 2
+	got, err := mapAny.Interface()
+	if err != nil {
+		t.Fatalf("NewAny(map).Interface() error = %v", err)
+	}
+	retained, ok := got.(map[string]int)
+	if !ok || retained["from-source"] != 2 {
+		t.Fatalf("NewAny(map).Interface() = %#v, want original map with source mutation", got)
+	}
+	retained["from-interface"] = 3
+	if mapValue["from-interface"] != 3 {
+		t.Fatalf("NewAny(map) did not preserve map identity: %#v", mapValue)
+	}
+	if _, err := mapAny.String(); !errors.Is(err, ErrUnsupportType) {
+		t.Fatalf("NewAny(map).String() error = %v, want ErrUnsupportType", err)
+	}
+
+	child := NewNumber("7")
+	pointerAny := NewAny(&child)
+	if pointerAny.Type() != V_NUMBER {
+		t.Fatalf("NewAny(*Node).Type() = %d, want V_NUMBER", pointerAny.Type())
+	}
+	if got, err := pointerAny.Interface(); err != nil || got != float64(7) {
+		t.Fatalf("NewAny(*Node).Interface() = %#v, %v; want float64(7), nil", got, err)
+	}
+
+	intAny := NewAny(42)
+	if got, err := intAny.Interface(); err != nil {
+		t.Fatalf("NewAny(42).Interface() error = %v", err)
+	} else if value, ok := got.(int); !ok || value != 42 {
+		t.Fatalf("NewAny(42).Interface() = %#v (%T), want int(42)", got, got)
+	}
+	if got, err := intAny.InterfaceUseNumber(); err != nil {
+		t.Fatalf("NewAny(42).InterfaceUseNumber() error = %v", err)
+	} else if value, ok := got.(int); !ok || value != 42 {
+		t.Fatalf("NewAny(42).InterfaceUseNumber() = %#v (%T), want int(42)", got, got)
+	}
+
+	t.Run("nil Node pointer panics", func(t *testing.T) {
+		defer func() {
+			if recover() == nil {
+				t.Fatal("NewAny(nil *Node) did not panic")
+			}
+		}()
+		var node *Node
+		_ = NewAny(node)
+	})
+}
+
+func TestNewAnyPreservesNumericConversions(t *testing.T) {
+	integer := NewAny(42)
+	if got, err := integer.Int64(); err != nil || got != 42 {
+		t.Fatalf("NewAny(42).Int64() = %d, %v; want 42, nil", got, err)
+	}
+	if got, err := integer.Float64(); err != nil || got != 42 {
+		t.Fatalf("NewAny(42).Float64() = %v, %v; want 42, nil", got, err)
+	}
+	if got, err := integer.Number(); err != nil || got != json.Number("1") {
+		t.Fatalf("NewAny(42).Number() = %q, %v; want 1, nil", got, err)
+	}
+	if got, err := integer.String(); err != nil || got != "42" {
+		t.Fatalf("NewAny(42).String() = %q, %v; want 42, nil", got, err)
+	}
+	if got, err := integer.StrictInt64(); err != nil || got != 42 {
+		t.Fatalf("NewAny(42).StrictInt64() = %d, %v; want 42, nil", got, err)
+	}
+	if _, err := integer.StrictFloat64(); !errors.Is(err, ErrUnsupportType) {
+		t.Fatalf("NewAny(42).StrictFloat64() error = %v, want ErrUnsupportType", err)
+	}
+	if _, err := integer.StrictNumber(); !errors.Is(err, ErrUnsupportType) {
+		t.Fatalf("NewAny(42).StrictNumber() error = %v, want ErrUnsupportType", err)
+	}
+
+	maxUint64 := uint64(math.MaxUint64)
+	maxUint := NewAny(maxUint64)
+	if got, err := maxUint.String(); err != nil || got != strconv.Itoa(int(maxUint64)) {
+		t.Fatalf("NewAny(MaxUint64).String() = %q, %v; want strconv.Itoa(int(MaxUint64)) = %q, nil", got, err, strconv.Itoa(int(maxUint64)))
+	}
+	if got, err := maxUint.Number(); err != nil || got != json.Number("1") {
+		t.Fatalf("NewAny(MaxUint64).Number() = %q, %v; want 1, nil", got, err)
+	}
+	if got, err := maxUint.StrictInt64(); err != nil || got != int64(maxUint64) {
+		t.Fatalf("NewAny(MaxUint64).StrictInt64() = %d, %v; want int64(MaxUint64) = %d, nil", got, err, int64(maxUint64))
+	}
+
+	float32Input := float32(1.5)
+	float32Value := NewAny(float32Input)
+	if got, err := float32Value.String(); err != nil || got != strconv.FormatFloat(float64(float32Input), 'g', -1, 64) {
+		t.Fatalf("NewAny(float32(1.5)).String() = %q, %v; want FormatFloat(float64(v), 'g', -1, 64) = %q, nil", got, err, strconv.FormatFloat(float64(float32Input), 'g', -1, 64))
+	}
+	if got, err := float32Value.Number(); err != nil || got != json.Number("1") {
+		t.Fatalf("NewAny(float32(1.5)).Number() = %q, %v; want 1, nil", got, err)
+	}
+	if got, err := float32Value.Float64(); err != nil || got != 1.5 {
+		t.Fatalf("NewAny(float32(1.5)).Float64() = %v, %v; want 1.5, nil", got, err)
+	}
+	if got, err := float32Value.StrictFloat64(); err != nil || got != 1.5 {
+		t.Fatalf("NewAny(float32(1.5)).StrictFloat64() = %v, %v; want 1.5, nil", got, err)
+	}
+	if _, err := float32Value.StrictNumber(); !errors.Is(err, ErrUnsupportType) {
+		t.Fatalf("NewAny(float32(1.5)).StrictNumber() error = %v, want ErrUnsupportType", err)
+	}
+
+	jsonNumber := NewAny(json.Number("12.5"))
+	if got, err := jsonNumber.Number(); err != nil || got != json.Number("12.5") {
+		t.Fatalf("NewAny(json.Number).Number() = %q, %v; want 12.5, nil", got, err)
+	}
+	if got, err := jsonNumber.StrictNumber(); err != nil || got != json.Number("12.5") {
+		t.Fatalf("NewAny(json.Number).StrictNumber() = %q, %v; want 12.5, nil", got, err)
+	}
+	if got, err := jsonNumber.String(); err != nil || got != "12.5" {
+		t.Fatalf("NewAny(json.Number).String() = %q, %v; want 12.5, nil", got, err)
+	}
+	if _, err := jsonNumber.StrictFloat64(); !errors.Is(err, ErrUnsupportType) {
+		t.Fatalf("NewAny(json.Number).StrictFloat64() error = %v, want ErrUnsupportType", err)
+	}
+
+	for _, tt := range []struct {
+		value      bool
+		wantNumber json.Number
+		wantString string
+	}{
+		{value: true, wantNumber: json.Number("1"), wantString: "true"},
+		{value: false, wantNumber: json.Number("0"), wantString: "false"},
+	} {
+		node := NewAny(tt.value)
+		if got, err := node.Number(); err != nil || got != tt.wantNumber {
+			t.Fatalf("NewAny(%t).Number() = %q, %v; want %q, nil", tt.value, got, err, tt.wantNumber)
+		}
+		if got, err := node.String(); err != nil || got != tt.wantString {
+			t.Fatalf("NewAny(%t).String() = %q, %v; want %q, nil", tt.value, got, err, tt.wantString)
+		}
+	}
+
+	numericString := NewAny("42")
+	if got, err := numericString.Int64(); err != nil || got != 42 {
+		t.Fatalf("NewAny(\"42\").Int64() = %d, %v; want 42, nil", got, err)
+	}
+	if got, err := numericString.Float64(); err != nil || got != 42 {
+		t.Fatalf("NewAny(\"42\").Float64() = %v, %v; want 42, nil", got, err)
+	}
+	if got, err := numericString.Number(); err != nil || got != json.Number("42") {
+		t.Fatalf("NewAny(\"42\").Number() = %q, %v; want 42, nil", got, err)
+	}
+	if got, err := numericString.StrictString(); err != nil || got != "42" {
+		t.Fatalf("NewAny(\"42\").StrictString() = %q, %v; want 42, nil", got, err)
+	}
+	if _, err := integer.StrictString(); !errors.Is(err, ErrUnsupportType) {
+		t.Fatalf("NewAny(42).StrictString() error = %v, want ErrUnsupportType", err)
+	}
+}
+
+func TestNewAnyContainerUseNodeReturnsOriginalValues(t *testing.T) {
+	array := []Node{NewNumber("1")}
+	arrayAny := NewAny(array)
+	gotArray, err := arrayAny.ArrayUseNode()
+	if err != nil || len(gotArray) != 1 {
+		t.Fatalf("NewAny([]Node).ArrayUseNode() = %#v, %v; want original one-element []Node, nil", gotArray, err)
+	}
+	gotArray[0] = NewNumber("2")
+	if got, err := array[0].Raw(); err != nil || got != "2" {
+		t.Fatalf("ArrayUseNode() did not return original slice: raw = %q, %v; want 2, nil", got, err)
+	}
+
+	object := map[string]Node{"x": NewNumber("1")}
+	objectAny := NewAny(object)
+	gotObject, err := objectAny.MapUseNode()
+	if err != nil || len(gotObject) != 1 {
+		t.Fatalf("NewAny(map[string]Node).MapUseNode() = %#v, %v; want original one-entry map, nil", gotObject, err)
+	}
+	gotObject["x"] = NewNumber("2")
+	objectNode := object["x"]
+	if got, err := objectNode.Raw(); err != nil || got != "2" {
+		t.Fatalf("MapUseNode() did not return original map: raw = %q, %v; want 2, nil", got, err)
+	}
+
+	integer := NewAny(42)
+	if _, err := integer.ArrayUseNode(); !errors.Is(err, ErrUnsupportType) {
+		t.Fatalf("NewAny(42).ArrayUseNode() error = %v; want ErrUnsupportType", err)
+	}
+	if _, err := integer.MapUseNode(); !errors.Is(err, ErrUnsupportType) {
+		t.Fatalf("NewAny(42).MapUseNode() error = %v; want ErrUnsupportType", err)
+	}
+}
+
+func TestNewBytesEmptyPanics(t *testing.T) {
+	for _, src := range [][]byte{nil, {}} {
+		func() {
+			defer func() {
+				if recover() == nil {
+					t.Fatalf("NewBytes(%#v) did not panic", src)
+				}
+			}()
+			_ = NewBytes(src)
+		}()
+	}
+}
+
+// Parser advances incrementally: scalar tokens consume themselves, while
+// leading whitespace is only part of the recognition step.
+func TestParserParseScalarIncrementalCursor(t *testing.T) {
+	p := NewParser(" 1 true")
+
+	first, code := p.Parse()
+	if code != 0 {
+		t.Fatalf("first Parse code = %v", code)
+	}
+	if raw, err := first.Raw(); err != nil || raw != "1" {
+		t.Fatalf("first Parse Raw() = %q, %v; want 1, nil", raw, err)
+	}
+	if p.Pos() != 2 {
+		t.Fatalf("first Parse Pos = %d; want 2", p.Pos())
+	}
+
+	second, code := p.Parse()
+	if code != 0 {
+		t.Fatalf("second Parse code = %v", code)
+	}
+	if raw, err := second.Raw(); err != nil || raw != "true" {
+		t.Fatalf("second Parse Raw() = %q, %v; want true, nil", raw, err)
+	}
+	if p.Pos() != 7 {
+		t.Fatalf("second Parse Pos = %d; want 7", p.Pos())
+	}
+
+	if _, code := p.Parse(); code != nativetypes.ERR_EOF {
+		t.Fatalf("third Parse code = %v; want ERR_EOF", code)
+	}
+	if p.Pos() != 7 {
+		t.Fatalf("third Parse Pos = %d; want 7", p.Pos())
+	}
+}
+
+// Empty containers consume their closing delimiter, including intervening
+// JSON whitespace.
+func TestParserParseEmptyContainersConsumeCloser(t *testing.T) {
+	p := NewParser(" [ ] {}")
+
+	array, code := p.Parse()
+	if code != 0 || array.Type() != V_ARRAY {
+		t.Fatalf("array Parse = type %d, code %v; want V_ARRAY, 0", array.Type(), code)
+	}
+	if p.Pos() != 4 {
+		t.Fatalf("array Parse Pos = %d; want 4", p.Pos())
+	}
+
+	object, code := p.Parse()
+	if code != 0 || object.Type() != V_OBJECT {
+		t.Fatalf("object Parse = type %d, code %v; want V_OBJECT, 0", object.Type(), code)
+	}
+	if p.Pos() != 7 {
+		t.Fatalf("object Parse Pos = %d; want 7", p.Pos())
+	}
+}
+
+// Non-empty containers are independently lazy, but leave Parser at the first
+// byte after the opener so successive calls can parse their interior.
+func TestParserParseNonEmptyContainersAreLazyAndIncremental(t *testing.T) {
+	t.Run("array", func(t *testing.T) {
+		p := NewParser(" [ 1,2]")
+		node, code := p.Parse()
+		if code != 0 || node.Type() != V_ARRAY {
+			t.Fatalf("Parse = type %d, code %v; want V_ARRAY, 0", node.Type(), code)
+		}
+		if p.Pos() != 2 {
+			t.Fatalf("container Parse Pos = %d; want 2", p.Pos())
+		}
+		if got, err := node.Index(0).Int64(); err != nil || got != 1 {
+			t.Fatalf("node.Index(0).Int64() = %d, %v; want 1, nil", got, err)
+		}
+		if p.Pos() != 2 {
+			t.Fatalf("loading returned node changed Pos to %d; want 2", p.Pos())
+		}
+		child, code := p.Parse()
+		if code != 0 {
+			t.Fatalf("interior Parse code = %v", code)
+		}
+		if raw, err := child.Raw(); err != nil || raw != "1" {
+			t.Fatalf("interior Parse Raw() = %q, %v; want 1, nil", raw, err)
+		}
+		if p.Pos() != 4 {
+			t.Fatalf("interior Parse Pos = %d; want 4", p.Pos())
+		}
+	})
+
+	t.Run("object", func(t *testing.T) {
+		p := NewParser(` { "a":1}`)
+		node, code := p.Parse()
+		if code != 0 || node.Type() != V_OBJECT {
+			t.Fatalf("Parse = type %d, code %v; want V_OBJECT, 0", node.Type(), code)
+		}
+		if p.Pos() != 2 {
+			t.Fatalf("container Parse Pos = %d; want 2", p.Pos())
+		}
+		if got, err := node.Get("a").Int64(); err != nil || got != 1 {
+			t.Fatalf("node.Get(\"a\").Int64() = %d, %v; want 1, nil", got, err)
+		}
+		if p.Pos() != 2 {
+			t.Fatalf("loading returned node changed Pos to %d; want 2", p.Pos())
+		}
+		key, code := p.Parse()
+		if code != 0 {
+			t.Fatalf("interior Parse code = %v", code)
+		}
+		if raw, err := key.Raw(); err != nil || raw != `"a"` {
+			t.Fatalf("interior Parse Raw() = %q, %v; want \"a\", nil", raw, err)
+		}
+		if p.Pos() != 6 {
+			t.Fatalf("interior Parse Pos = %d; want 6", p.Pos())
+		}
+	})
+}
+
+// Invalid scalar and string attempts preserve their original starting cursor,
+// even if recognition skipped leading whitespace.
+func TestParserParseMalformedAttemptsKeepStartPosition(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		src  string
+		want nativetypes.ParsingError
+	}{
+		{name: "invalid character after whitespace", src: "  @", want: nativetypes.ERR_INVALID_CHAR},
+		{name: "unterminated string", src: "\"unterminated", want: nativetypes.ERR_EOF},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			p := NewParser(tt.src)
+			if _, code := p.Parse(); code != tt.want {
+				t.Fatalf("Parse(%q) code = %v; want %v", tt.src, code, tt.want)
+			}
+			if p.Pos() != 0 {
+				t.Fatalf("Parse(%q) Pos = %d; want 0", tt.src, p.Pos())
+			}
+			if got := p.ExportError(tt.want).Error(); !strings.Contains(got, "at index 0") {
+				t.Fatalf("ExportError(%v) = %q; want absolute index 0", tt.want, got)
+			}
+		})
+	}
+}
+
+// A non-empty malformed container is returned as a deferred raw node. Its
+// opening delimiter advances Parser, while loading is responsible for error.
+func TestParserParseMalformedContainersDeferErrors(t *testing.T) {
+	for _, tt := range []struct {
+		src string
+		typ int
+	}{
+		{src: "[", typ: V_ARRAY},
+		{src: "{", typ: V_OBJECT},
+		{src: "[1,}", typ: V_ARRAY},
+	} {
+		t.Run(tt.src, func(t *testing.T) {
+			p := NewParser(tt.src)
+			node, code := p.Parse()
+			if code != 0 || node.Type() != tt.typ {
+				t.Fatalf("Parse(%q) = type %d, code %v; want type %d, 0", tt.src, node.Type(), code, tt.typ)
+			}
+			if p.Pos() != 1 {
+				t.Fatalf("Parse(%q) Pos = %d; want 1", tt.src, p.Pos())
+			}
+			if err := node.LoadAll(); err == nil {
+				t.Fatalf("Parse(%q).LoadAll() error = nil; want deferred error", tt.src)
+			}
+		})
+	}
+}
+
+// A comma is not itself a value: after an array opener and its first scalar,
+// Parse reports the original comma offset.
+func TestParserParseNonEmptyArrayCommaKeepsAttemptOffset(t *testing.T) {
+	p := NewParser("[1,2]")
+	if _, code := p.Parse(); code != 0 || p.Pos() != 1 {
+		t.Fatalf("container Parse = code %v, Pos %d; want 0, 1", code, p.Pos())
+	}
+	if _, code := p.Parse(); code != 0 || p.Pos() != 2 {
+		t.Fatalf("scalar Parse = code %v, Pos %d; want 0, 2", code, p.Pos())
+	}
+	if _, code := p.Parse(); code != nativetypes.ERR_INVALID_CHAR {
+		t.Fatalf("comma Parse code = %v; want ERR_INVALID_CHAR", code)
+	}
+	if p.Pos() != 2 {
+		t.Fatalf("comma Parse Pos = %d; want 2", p.Pos())
+	}
+	if got := p.ExportError(nativetypes.ERR_INVALID_CHAR).Error(); !strings.Contains(got, "at index 2") {
+		t.Fatalf("comma ExportError = %q; want absolute index 2", got)
 	}
 }
 

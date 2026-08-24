@@ -216,26 +216,13 @@ func TestNodeConversionsAndMissingValues(t *testing.T) {
 		t.Fatalf("Number() = %q, %v; want 42, nil", got, err)
 	}
 	missing := n.Get("missing")
-	if missing.Exists() || !missing.Valid() {
-		t.Fatalf("missing Exists/Valid = %v/%v, want false/true", missing.Exists(), missing.Valid())
-	}
-	if _, err := missing.String(); !errors.Is(err, ErrNotExist) {
-		t.Fatalf("missing.String() error = %v, want ErrNotExist", err)
-	}
+	assertMissingNodeState(t, missing)
 }
 
 func TestNodeExistsValidCheckMatchSonicStatePredicates(t *testing.T) {
 	root := NewRaw(`{"x":1}`)
 	missing := root.Get("missing")
-	if missing.Exists() {
-		t.Fatalf("missing Exists() = true, want false")
-	}
-	if !missing.Valid() {
-		t.Fatalf("missing Valid() = false, want true")
-	}
-	if err := missing.Check(); err != nil {
-		t.Fatalf("missing Check() = %v, want nil", err)
-	}
+	assertMissingNodeState(t, missing)
 
 	var zero Node
 	if zero.Exists() {
@@ -279,6 +266,22 @@ func TestNodeExistsValidCheckMatchSonicStatePredicates(t *testing.T) {
 	}
 	if err := nilNode.Check(); !errors.Is(err, ErrNotExist) {
 		t.Fatalf("nil Check() = %v, want ErrNotExist", err)
+	}
+}
+
+func assertMissingNodeState(t *testing.T, missing *Node) {
+	t.Helper()
+	if missing != nil {
+		t.Fatalf("missing object Get = %#v, want nil", missing)
+	}
+	if missing.Exists() || missing.Valid() {
+		t.Fatalf("missing Exists/Valid = %v/%v, want false/false", missing.Exists(), missing.Valid())
+	}
+	if err := missing.Check(); !errors.Is(err, ErrNotExist) {
+		t.Fatalf("missing Check() = %v, want ErrNotExist", err)
+	}
+	if _, err := missing.String(); !errors.Is(err, ErrNotExist) {
+		t.Fatalf("missing.String() error = %v, want ErrNotExist", err)
 	}
 }
 
@@ -523,9 +526,15 @@ func TestSearcherAndParser(t *testing.T) {
 		t.Fatalf("id = %d, %v; want 2, nil", got, err)
 	}
 	p := NewParser(`{"ok":true)`)
-	_, perr := p.Parse()
-	if perr == 0 {
-		t.Fatalf("Parse invalid JSON returned no ParsingError")
+	node, perr := p.Parse()
+	if perr != 0 || node.Type() != V_OBJECT {
+		t.Fatalf("Parse malformed object = type %d, code %v; want V_OBJECT, 0", node.Type(), perr)
+	}
+	if p.Pos() != 1 {
+		t.Fatalf("Parse malformed object Pos = %d; want 1", p.Pos())
+	}
+	if err := node.LoadAll(); err == nil {
+		t.Fatal("Parse malformed object LoadAll() error = nil; want deferred error")
 	}
 }
 

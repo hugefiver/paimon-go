@@ -21,7 +21,8 @@ Go 1.26.7，以进入其支持的原生/JIT 路径。该口径保持硬件和 be
 - `go.local.mod` 包含 `replace github.com/bytedance/sonic => ..`，解析到本地仓库。
 
 所有 runner 命令都使用 `-mod=readonly`，不会修改 `go.mod`、`go.sum` 或
-`go.local.mod`。
+`go.local.mod`。runner 对每个 block 强制 `GOPROXY=off`：所需 modules 和
+upstream toolchain 必须已经缓存，cache miss 会失败而不会下载。
 
 ## 一键运行
 
@@ -38,11 +39,20 @@ runner 会串行执行四个 block，每项 benchmark 运行 3 次并输出内�
 - `=== local root jsonv2 tag ===`
 - `=== upstream sonic v1.15.2 / Go 1.26.7 ===`
 
-upstream block 临时设置 `GOTOOLCHAIN=go1.26.7`。如果本机尚未缓存该官方
-toolchain，Go 会自动下载；block 结束后 runner 会恢复调用者原有的
-`GOTOOLCHAIN` 和 `GOEXPERIMENT` 状态。
+runner 在 local JSON v2 block 临时设置 `GOEXPERIMENT=jsonv2`，在 upstream block
+临时设置 `GOTOOLCHAIN=go1.26.7` 并移除 `GOEXPERIMENT`。所有四个 block 均在
+`GOPROXY=off` 下执行；每块在启动 benchmark 前验证 `$env:GOPROXY`、`go env GOPROXY`
+精确为 `off`，并验证完整 `go version` 包含 local 所需的 `go1.27` 或 upstream 所需的
+`go1.26.7`。验证成功后，日志会打印稳定的
+`PROOF: label=<block>; GOPROXY=off; go version=<完整 go version>` 行；任一命令失败或
+值不符都会立即终止，因而不会执行该块 benchmark。缺少缓存的 module 或 toolchain 也会
+失败而不会下载。无论成功还是异常，runner 都会精确恢复调用者原有的 `GOPROXY`、
+`GOEXPERIMENT` 和 `GOTOOLCHAIN` 的存在性和值。
 
 ## 手动命令
+
+下列命令应在离线环境运行；可在包住单个命令的 `try`/`finally` 中临时设置
+`$env:GOPROXY = 'off'` 并恢复调用者原值。使用 runner 可自动完成该恢复。
 
 ### Local root/default
 

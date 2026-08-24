@@ -780,6 +780,37 @@ func TestMismatchTypeErrorMethods(t *testing.T) {
 	}
 }
 
+func TestDecoderErrorFieldSuperset(t *testing.T) {
+	syntax := SyntaxError{
+		Pos:    1,
+		Src:    `{`,
+		Code:   nativetypes.ERR_INVALID_CHAR,
+		Msg:    "bad",
+		Offset: 41,
+	}
+	if syntax.Pos != 1 || syntax.Src != `{` || syntax.Code != nativetypes.ERR_INVALID_CHAR || syntax.Msg != "bad" || syntax.Offset != 41 {
+		t.Fatalf("SyntaxError fields = %#v", syntax)
+	}
+	var _ int64 = syntax.Offset
+
+	mismatch := MismatchTypeError{
+		Pos:    2,
+		Src:    `1`,
+		Value:  "number",
+		Type:   reflect.TypeOf(""),
+		Offset: 42,
+		Struct: "Envelope",
+		Field:  "Value",
+	}
+	if mismatch.Pos != 2 || mismatch.Src != `1` || mismatch.Value != "number" || mismatch.Type != reflect.TypeOf("") || mismatch.Offset != 42 || mismatch.Struct != "Envelope" || mismatch.Field != "Value" {
+		t.Fatalf("MismatchTypeError fields = %#v", mismatch)
+	}
+	var _ string = mismatch.Value
+	var _ int64 = mismatch.Offset
+	var _ string = mismatch.Struct
+	var _ string = mismatch.Field
+}
+
 func TestDecodeSyntaxErrorReturned(t *testing.T) {
 	d := NewDecoder(`{bad json`)
 	var out map[string]interface{}

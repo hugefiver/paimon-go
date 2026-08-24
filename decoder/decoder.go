@@ -83,10 +83,11 @@ const (
 // SyntaxError represents a JSON syntax error. Its public fields and methods
 // mirror Sonic's decoder.SyntaxError surface.
 type SyntaxError struct {
-	Pos  int
-	Src  string
-	Code nativetypes.ParsingError
-	Msg  string
+	Pos    int
+	Src    string
+	Code   nativetypes.ParsingError
+	Msg    string
+	Offset int64
 }
 
 func (e SyntaxError) Error() string { return fmt.Sprintf("%q", e.Description()) }
@@ -105,9 +106,13 @@ func (e SyntaxError) Message() string {
 // MismatchTypeError represents a mismatch between a JSON value and the Go
 // destination type. It mirrors Sonic's public field shape.
 type MismatchTypeError struct {
-	Pos  int
-	Src  string
-	Type reflect.Type
+	Pos    int
+	Src    string
+	Type   reflect.Type
+	Value  string
+	Offset int64
+	Struct string
+	Field  string
 }
 
 func (e MismatchTypeError) Error() string { return e.Description() }

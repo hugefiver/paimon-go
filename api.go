@@ -84,8 +84,12 @@ type Decoder interface {
 // NoCopyRawMessage semantics for callers that own the input buffer.
 type NoCopyRawMessage []byte
 
-// MarshalJSON returns the underlying bytes. No copy is performed.
+// MarshalJSON returns the underlying bytes. No copy is performed. A nil
+// message is encoded as the JSON null literal.
 func (m NoCopyRawMessage) MarshalJSON() ([]byte, error) {
+	if m == nil {
+		return []byte("null"), nil
+	}
 	return m, nil
 }
 
@@ -192,7 +196,7 @@ func (a *api) Valid(data []byte) bool {
 // ---------------------------------------------------------------------------
 // defaultBackend routes operations to the stdjsoncompat fallback and
 // fastjsoncompat helpers. This is the reflection-based engine that is
-// always available; later tasks will add a fastjson-backed implementation.
+// always available.
 // ---------------------------------------------------------------------------
 
 type defaultBackend struct{}

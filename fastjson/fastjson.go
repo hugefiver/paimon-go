@@ -2,10 +2,7 @@
 // high-frequency API and types of the root sonic package under the
 // github.com/bytedance/sonic/fastjson import path.
 //
-// It is a thin wrapper layer: every exported type is a type alias for the
-// corresponding root package type, and every exported function forwards to
-// the root package implementation. Callers that import this subpackage get
-// the exact same behavior as callers that import the root sonic package.
+// It is a thin wrapper layer: every exported type is an alias for the corresponding root package type. Package-level encode, decode, and validation helpers use the separately assignable package variable ConfigDefault; Get* and Pretouch* forward to the root package. Callers that import this subpackage get the exact same behavior as callers that import the root sonic package, except where its separately assignable configuration is intentionally selected.
 //
 // The package exists so that downstream code (and automated migrations)
 // referencing github.com/bytedance/sonic/fastjson keep compiling and
@@ -38,8 +35,7 @@ type (
 	NoCopyRawMessage = sonic.NoCopyRawMessage
 )
 
-// Pre-configured API instances. They are aliases for the root package's
-// variables so callers that swap imports see the identical engine.
+// Pre-configured API instances. ConfigDefault, ConfigStd, and ConfigFastest are separately assignable package variables initialized from root values.
 var (
 	ConfigDefault = sonic.ConfigDefault
 	ConfigStd     = sonic.ConfigStd
@@ -47,27 +43,29 @@ var (
 )
 
 // Marshal serializes v as JSON using ConfigDefault.
-func Marshal(v interface{}) ([]byte, error) { return sonic.Marshal(v) }
+func Marshal(v interface{}) ([]byte, error) { return ConfigDefault.Marshal(v) }
 
 // MarshalString is like Marshal but returns a string.
-func MarshalString(v interface{}) (string, error) { return sonic.MarshalString(v) }
+func MarshalString(v interface{}) (string, error) { return ConfigDefault.MarshalToString(v) }
 
 // MarshalIndent serializes v with a two-dimensional indent.
 func MarshalIndent(v interface{}, prefix, indent string) ([]byte, error) {
-	return sonic.MarshalIndent(v, prefix, indent)
+	return ConfigDefault.MarshalIndent(v, prefix, indent)
 }
 
 // Unmarshal parses data into v using ConfigDefault.
-func Unmarshal(data []byte, v interface{}) error { return sonic.Unmarshal(data, v) }
+func Unmarshal(data []byte, v interface{}) error { return ConfigDefault.Unmarshal(data, v) }
 
 // UnmarshalString parses a string into v using ConfigDefault.
-func UnmarshalString(buf string, v interface{}) error { return sonic.UnmarshalString(buf, v) }
+func UnmarshalString(buf string, v interface{}) error {
+	return ConfigDefault.UnmarshalFromString(buf, v)
+}
 
 // Valid reports whether data is a single well-formed JSON value.
-func Valid(data []byte) bool { return sonic.Valid(data) }
+func Valid(data []byte) bool { return ConfigDefault.Valid(data) }
 
 // ValidString is the string-input form of Valid.
-func ValidString(data string) bool { return sonic.ValidString(data) }
+func ValidString(data string) bool { return ConfigDefault.Valid([]byte(data)) }
 
 // Get resolves path against data and returns the matching AST node.
 func Get(data []byte, path ...interface{}) (ast.Node, error) { return sonic.Get(data, path...) }

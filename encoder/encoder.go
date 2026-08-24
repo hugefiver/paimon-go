@@ -117,13 +117,12 @@ func EncodeIndented(val interface{}, prefix string, indent string, opts Options)
 
 // EncodeInto appends the JSON encoding of val to *buf. The existing
 // contents of *buf are preserved; the encoded value is appended after
-// them. A nil *buf is treated as an error to make accidental misuse
-// explicit.
+// them. A nil *buf panics.
 //
 // If encoding fails, *buf is left untouched.
 func EncodeInto(buf *[]byte, val interface{}, opts Options) error {
 	if buf == nil {
-		return errNilBuffer
+		panic("user-supplied buffer buf is nil")
 	}
 	out, err := Encode(val, opts)
 	if err != nil {
@@ -199,19 +198,24 @@ type Encoder struct {
 	// Opts is the Options bitmask applied to Encode. The Set* methods
 	// mutate this field in place.
 	Opts Options
-	// prefix and indent hold the indentation settings. When indent is
+	// prefix and indent hold the indentation settings. When both are
 	// empty Encode produces compact output.
 	prefix string
 	indent string
 }
 
-// Encode marshals v under the encoder's current configuration. When
-// indent is non-empty the output is indented; otherwise it is compact.
+// Encode marshals v under the encoder's current configuration. When prefix
+// or indent is non-empty the output is indented and terminated with a newline;
+// otherwise it is compact.
 func (e *Encoder) Encode(v interface{}) ([]byte, error) {
-	if e.indent == "" {
+	if e.prefix == "" && e.indent == "" {
 		return Encode(v, e.Opts)
 	}
-	return EncodeIndented(v, e.prefix, e.indent, e.Opts)
+	out, err := EncodeIndented(v, e.prefix, e.indent, e.Opts)
+	if err != nil {
+		return nil, err
+	}
+	return append(out, '\n'), nil
 }
 
 // SetCompactMarshaler toggles the CompactMarshaler option bit.
@@ -233,15 +237,13 @@ func (e *Encoder) SetEscapeHTML(on bool) {
 }
 
 // SetIndent sets the prefix and indent strings used when producing
-// indented output. An empty indent string restores compact output.
+// indented output. Empty prefix and indent strings restore compact output.
 func (e *Encoder) SetIndent(prefix, indent string) {
 	e.prefix = prefix
 	e.indent = indent
 }
 
-// SetNoEncoderNewline toggles the NoEncoderNewline option bit. This is
-// honored by StreamEncoder.Encode; Encoder.Encode itself never emits a
-// trailing newline.
+// SetNoEncoderNewline toggles the NoEncoderNewline option bit. Encoder.Encode emits a trailing newline only for indented output; StreamEncoder applies the option to suppress its final newline.
 func (e *Encoder) SetNoEncoderNewline(on bool) {
 	if on {
 		e.Opts |= NoEncoderNewline
@@ -317,6 +319,9 @@ func (e *StreamEncoder) Encode(val interface{}) error {
 	if err != nil {
 		return err
 	}
+	if e.Opts&NoEncoderNewline != 0 && len(out) > 0 && out[len(out)-1] == '\n' {
+		out = out[:len(out)-1]
+	}
 	for offset := 0; offset < len(out); {
 		n, err := e.w.Write(out[offset:])
 		if err != nil {
@@ -327,7 +332,7 @@ func (e *StreamEncoder) Encode(val interface{}) error {
 		}
 		offset += n
 	}
-	if e.Opts&NoEncoderNewline == 0 {
+	if e.Opts&NoEncoderNewline == 0 && (len(out) == 0 || out[len(out)-1] != '\n') {
 		for offset := 0; offset < len(newlineBytes); {
 			n, err := e.w.Write(newlineBytes[offset:])
 			if err != nil {
@@ -345,11 +350,3 @@ func (e *StreamEncoder) Encode(val interface{}) error {
 // newlineBytes is the single-byte newline appended by StreamEncoder
 // when NoEncoderNewline is not set.
 var newlineBytes = []byte{'\n'}
-
-// errNilBuffer is returned by EncodeInto when called with a nil *[]byte.
-type stringError struct{ msg string }
-
-func (e *stringError) Error() string { return e.msg }
-
-// errNilBuffer is returned by EncodeInto when buf is nil.
-var errNilBuffer = &stringError{msg: "encoder: EncodeInto called with nil buffer"}

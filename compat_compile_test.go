@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"io"
+	"os"
 	"reflect"
 	"strings"
 	"testing"
@@ -229,13 +230,25 @@ func TestCompileCompatibilityDecoder(t *testing.T) {
 	_ = decoder.OptionNoValidateJSON
 	_ = decoder.OptionCaseSensitive
 
-	decSE := decoder.SyntaxError{Msg: "bad"}
+	decSE := decoder.SyntaxError{Pos: 1, Src: `{`, Code: 0, Msg: "bad", Offset: 41}
 	_ = decSE.Error()
 	_ = decSE.Description()
 	_ = decSE.Message()
-	decMTE := decoder.MismatchTypeError{Type: reflect.TypeOf(0)}
+	_ = decSE.Pos
+	_ = decSE.Src
+	_ = decSE.Code
+	_ = decSE.Msg
+	var _ int64 = decSE.Offset
+	decMTE := decoder.MismatchTypeError{Pos: 2, Src: `1`, Value: "number", Type: reflect.TypeOf(0), Offset: 42, Struct: "Envelope", Field: "Value"}
 	_ = decMTE.Error()
 	_ = decMTE.Description()
+	_ = decMTE.Pos
+	_ = decMTE.Src
+	var _ string = decMTE.Value
+	_ = decMTE.Type
+	var _ int64 = decMTE.Offset
+	var _ string = decMTE.Struct
+	var _ string = decMTE.Field
 
 	// Skip returns two values.
 	start, end := decoder.Skip([]byte(`{"a":1}`))
@@ -779,4 +792,74 @@ func (c *compileVisitor) OnArrayEnd() error                    { return nil }
 func TestCompileCompatibilityTypes(t *testing.T) {
 	var _ io.Reader = strings.NewReader("")
 	var _ io.Writer = &bytes.Buffer{}
+}
+
+func TestFinalReviewDocumentationClaims(t *testing.T) {
+	for _, tt := range []struct {
+		path     string
+		contains []string
+		absent   []string
+	}{
+		{
+			path: "encoder/encoder.go",
+			contains: []string{
+				"Encoder.Encode emits a trailing newline only for indented output; StreamEncoder applies the option to suppress its final newline.",
+			},
+			absent: []string{
+				"Encoder.Encode itself never emits a\n// trailing newline.",
+			},
+		},
+		{
+			path: "fastjson/fastjson.go",
+			contains: []string{
+				"every exported type is an alias for the corresponding root package type",
+				"Package-level encode, decode, and validation helpers use the separately assignable package variable ConfigDefault; Get* and Pretouch* forward to the root package.",
+				"ConfigDefault, ConfigStd, and ConfigFastest are separately assignable package variables initialized from root values.",
+			},
+			absent: []string{
+				"every exported function forwards to\n// the root package implementation",
+			},
+		},
+		{
+			path: "docs/compatibility.md",
+			contains: []string{
+				"Package-level encode, decode, and validation helpers use the separately assignable `fastjson.ConfigDefault`; `Get*` and `Pretouch*` forward to the root package.",
+				"This local `Valid`/`Unmarshal` acceptance is an intentional divergence from the Go 1.27 upstream Sonic fallback, while both implementations' raw AST entry points agree on the raw value.",
+			},
+		},
+		{
+			path: "README.md",
+			contains: []string{
+				"当前 checkout 中提交的 fuzz corpus 总数为 7：root Valid 1 个、AST roundtrip 1 个、differential 5 个。",
+				"源码内置 10 个 `f.Add` seed",
+				"不能当作当前 checkout 中提交的 corpus 数量",
+			},
+		},
+		{
+			path: "difftest/README.md",
+			contains: []string{
+				"builds direct helper executables once per test process in an owned OS temporary directory using `go build -mod=readonly`, then invokes those executables directly",
+				"bounded `Cmd.WaitDelay`",
+				"raw AST entry points agree after invalid UTF-8 in string tokens is normalized to U+FFFD",
+			},
+		},
+	} {
+		t.Run(tt.path, func(t *testing.T) {
+			contents, err := os.ReadFile(tt.path)
+			if err != nil {
+				t.Fatalf("read %s: %v", tt.path, err)
+			}
+			text := string(contents)
+			for _, want := range tt.contains {
+				if !strings.Contains(text, want) {
+					t.Errorf("%s does not contain required text %q", tt.path, want)
+				}
+			}
+			for _, stale := range tt.absent {
+				if strings.Contains(text, stale) {
+					t.Errorf("%s contains stale text %q", tt.path, stale)
+				}
+			}
+		})
+	}
 }

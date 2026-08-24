@@ -34,7 +34,7 @@ const (
 
 // ErrNotExist is returned by accessor methods that target a value which
 // does not exist in the parsed JSON.
-var ErrNotExist = errors.New("value not exist")
+var ErrNotExist = errors.New("value not exists")
 
 // ErrUnsupportType is returned when a conversion or constructor receives
 // a Go value that cannot be mapped to a JSON node.
@@ -64,6 +64,7 @@ type Node struct {
 	arr    []Node
 	obj    []Pair
 	boolv  bool
+	any    interface{}
 	err    error
 }
 
@@ -80,6 +81,15 @@ type Pair struct {
 type Sequence struct {
 	Index int
 	Key   *string
+}
+
+// String returns the Sonic-compatible textual representation of a path step.
+func (s Sequence) String() string {
+	key := ""
+	if s.Key != nil {
+		key = *s.Key
+	}
+	return fmt.Sprintf("Sequence(%d, %q)", s.Index, key)
 }
 
 // Scanner is the callback signature used by Node.ForEach.

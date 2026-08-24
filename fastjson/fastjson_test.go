@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	sonic "github.com/bytedance/sonic"
 	"github.com/bytedance/sonic/ast"
 	"github.com/bytedance/sonic/option"
 )
@@ -21,6 +22,75 @@ var (
 	_ Decoder          = Decoder(nil)
 	_ NoCopyRawMessage = NoCopyRawMessage(nil)
 )
+
+func TestPackageFunctionsAndConstructorsShareConfigDefault(t *testing.T) {
+	oldConfigDefault := ConfigDefault
+	defer func() { ConfigDefault = oldConfigDefault }()
+	ConfigDefault = sonic.Config{EscapeHTML: true, UseNumber: true}.Froze()
+
+	marshaled, err := Marshal("<")
+	if err != nil {
+		t.Fatalf("Marshal error = %v", err)
+	}
+	if !bytes.Contains(marshaled, []byte(`\u003c`)) {
+		t.Fatalf("Marshal did not use ConfigDefault EscapeHTML: %s", marshaled)
+	}
+
+	var encoderOutput bytes.Buffer
+	if err := NewEncoder(&encoderOutput).Encode("<"); err != nil {
+		t.Fatalf("NewEncoder.Encode error = %v", err)
+	}
+	if !bytes.Contains(encoderOutput.Bytes(), []byte(`\u003c`)) {
+		t.Fatalf("NewEncoder did not use ConfigDefault EscapeHTML: %s", encoderOutput.String())
+	}
+
+	var unmarshaled interface{}
+	if err := Unmarshal([]byte(`1`), &unmarshaled); err != nil {
+		t.Fatalf("Unmarshal error = %v", err)
+	}
+	if _, ok := unmarshaled.(json.Number); !ok {
+		t.Fatalf("Unmarshal did not use ConfigDefault UseNumber: got %T", unmarshaled)
+	}
+
+	var decoded interface{}
+	if err := NewDecoder(strings.NewReader(`1`)).Decode(&decoded); err != nil {
+		t.Fatalf("NewDecoder.Decode error = %v", err)
+	}
+	if _, ok := decoded.(json.Number); !ok {
+		t.Fatalf("NewDecoder did not use ConfigDefault UseNumber: got %T", decoded)
+	}
+
+	marshaledString, err := MarshalString("<")
+	if err != nil {
+		t.Fatalf("MarshalString error = %v", err)
+	}
+	if !strings.Contains(marshaledString, `\u003c`) {
+		t.Fatalf("MarshalString did not use ConfigDefault EscapeHTML: %s", marshaledString)
+	}
+
+	marshaledIndent, err := MarshalIndent(map[string]string{"x": "<"}, "", "  ")
+	if err != nil {
+		t.Fatalf("MarshalIndent error = %v", err)
+	}
+	if !bytes.Contains(marshaledIndent, []byte("\n  ")) || !bytes.Contains(marshaledIndent, []byte(`\u003c`)) {
+		t.Fatalf("MarshalIndent did not indent and HTML-escape with ConfigDefault: %s", marshaledIndent)
+	}
+
+	var unmarshaledString interface{}
+	if err := UnmarshalString(`1`, &unmarshaledString); err != nil {
+		t.Fatalf("UnmarshalString error = %v", err)
+	}
+	if _, ok := unmarshaledString.(json.Number); !ok {
+		t.Fatalf("UnmarshalString did not use ConfigDefault UseNumber: got %T", unmarshaledString)
+	}
+
+	if !Valid([]byte(`{"x":"\u003c"}`)) || Valid([]byte(`{"x":`)) {
+		t.Fatalf("Valid did not distinguish valid and invalid JSON")
+	}
+	if !ValidString(`{"x":"\u003c"}`) || ValidString(`{"x":`) {
+		t.Fatalf("ValidString did not distinguish valid and invalid JSON")
+	}
+}
 
 func TestWrappersMarshalUnmarshalAndValid(t *testing.T) {
 	type sample struct {

@@ -31,10 +31,14 @@ Sonic `v1.15.2` 的公开 API。下游项目可以保留原有 Sonic import，�
 
 ## 安装与本地替换
 
-预定源码发布位置是 <https://github.com/hugefiver/paimon-go>。该 GitHub 仓库当前
-为空，不能通过 clone 获得 `go.mod` 或源码，也不是当前可安装来源。当前可执行流程
-要求已有一个包含本项目 `go.mod` 和源码的本地 checkout；当它与 consumer 目录相邻
-时，在 consumer 的 `go.mod` 中保留原 Sonic 依赖并指向该 checkout：
+源码已发布在 <https://github.com/hugefiver/paimon-go>，可取得本地 checkout：
+
+```powershell
+git clone https://github.com/hugefiver/paimon-go.git
+```
+
+在 consumer 的 `go.mod` 中保留原 Sonic 依赖，并使用 local-directory `replace`
+指向这个 checkout（例如与 consumer 目录相邻时）：
 
 ```go
 require github.com/bytedance/sonic v1.15.2
@@ -49,9 +53,8 @@ replace github.com/bytedance/sonic => ../paimon-go
 import "github.com/bytedance/sonic"
 ```
 
-只有用户另行授权发布源码后，GitHub clone 才成为可用流程，届时再补充 clone
-说明；只有正式 release 发布后，才能补充远程 module-version 替换流程。当前不提供
-clone 命令或任何未发布版本命令。
+不要将 `github.com/hugefiver/paimon-go` 用作 Go module import 或 `go install`
+目标；module directive 未改，consumer 应继续使用原 import 加本地目录 replace。
 
 ## 快速开始
 
@@ -143,18 +146,23 @@ go test -mod=readonly -tags sonic_jsonv2 ./... -count=1
 
 ## Benchmark：与上游 Sonic v1.15.2 对比
 
-以下结果来自 2026-08-24 对当前 build-tag root 接线版本的一次本机实测，每个
-benchmark 串行执行 3 次并取 `ns/op` 中位数。数值越低越好。
+以下结果来自 2026-08-25 使用 `bench/run.ps1` 的一次本机离线实测。每个 benchmark
+在每种模式下串行执行 3 次；`ns/op`、`B/op` 和 `allocs/op` 均取这 3 次的中位数。数值越低越好。
 
 ### 测试环境
 
 - 操作系统：Windows/amd64
-- Local default、`sonic_stdjson`、JSON v2 implementation：`go1.27.0`
+- Local default、`sonic_stdjson`、`sonic_jsonv2`：Go 1.27
 - Upstream Sonic v1.15.2：`go1.26.7`（通过 `GOTOOLCHAIN` 单独选择）
-- CPU：12th Gen Intel Core i9-12900H
+- CPU：12th Gen Intel(R) Core(TM) i9-12900H
 - 并行度：20（benchmark 名称后缀 `-20`）
 - 参数：`-benchmem -count=3`，使用默认 benchtime
 - 依赖模式：全部使用 `-mod=readonly`
+- 网络：四个 block 都由 runner 强制 `GOPROXY=off`；module 和 upstream toolchain
+  均命中本机缓存
+- 日志证明：每个 block 在 benchmark 前都打印稳定的 `PROOF:` 行，包含 block label、
+  `GOPROXY=off` 与完整 `go version`；runner 同时验证 `go env GOPROXY` 精确为 `off`，
+  local 为 `go1.27`、upstream 为 `go1.26.7`
 
 > **重要限制：** 本项目要求 Go 1.27；上游 Sonic v1.15.2 为进入其受支持的
 > 原生/JIT 路径而单独使用 Go 1.26.7。因此下表是在相同硬件和 payload 上进行的
@@ -163,40 +171,40 @@ benchmark 串行执行 3 次并取 `ns/op` 中位数。数值越低越好。
 
 ### 时间结果（中位数）
 
-| Benchmark | Local default / Go 1.27 | Local `sonic_stdjson` / Go 1.27 | Local JSON v2 implementation / Go 1.27 | Upstream v1.15.2 / Go 1.26.7 |
+| Benchmark | Local default / Go 1.27 | Local `sonic_stdjson` / Go 1.27 | Local `sonic_jsonv2` / Go 1.27 | Upstream v1.15.2 / Go 1.26.7 |
 |---|---:|---:|---:|---:|
-| Marshal small struct | 2,017 ns/op | 1,962 ns/op | 2,291 ns/op | **537.8 ns/op** |
-| Unmarshal medium map | 30,962 ns/op | 43,193 ns/op | 45,044 ns/op | **11,138 ns/op** |
-| Valid medium JSON | 1,547 ns/op | 3,393 ns/op | 1,503 ns/op | **1,069 ns/op** |
-| Get nested path | 536.3 ns/op | 1,908 ns/op | 1,061 ns/op | **278.4 ns/op** |
+| Marshal small struct | 1,476 ns/op | 1,881 ns/op | 1,430 ns/op | **529.4 ns/op** |
+| Unmarshal medium map | 27,702 ns/op | 25,674 ns/op | 23,829 ns/op | **11,318 ns/op** |
+| Valid medium JSON | 1,724 ns/op | 1,613 ns/op | 1,622 ns/op | **1,360 ns/op** |
+| Get nested path | 532.2 ns/op | 1,280 ns/op | 1,405 ns/op | **343.0 ns/op** |
 
 相对同机 upstream Go 1.26.7 中位数：
 
-- Local default：Marshal 约为 upstream 的 **3.75 倍耗时**，Unmarshal 慢约
-  **178.0%**，Valid 慢约 **44.7%**，Get 慢约 **92.6%**。
-- Local `sonic_stdjson`：Marshal 约为 upstream 的 **3.65 倍耗时**，
-  Unmarshal 慢约 **287.8%**，Valid 慢约 **217.4%**，Get 约为 upstream 的
-  **6.85 倍耗时**。
-- Local JSON v2 implementation：Marshal 约为 upstream 的 **4.26 倍耗时**，
-  Unmarshal 慢约 **304.4%**，Valid 慢约 **40.6%**，Get 约为 upstream 的
-  **3.81 倍耗时**。
+- Local default：Marshal 约为 upstream 的 **2.79 倍耗时**，Unmarshal 慢约
+  **144.8%**，Valid 慢约 **26.8%**，Get 约为 upstream 的 **1.55 倍耗时**。
+- Local `sonic_stdjson`：Marshal 约为 upstream 的 **3.55 倍耗时**，
+  Unmarshal 慢约 **126.8%**，Valid 慢约 **18.6%**，Get 约为 upstream 的
+  **3.73 倍耗时**。
+- Local `sonic_jsonv2`：Marshal 约为 upstream 的 **2.70 倍耗时**，
+  Unmarshal 慢约 **110.5%**，Valid 慢约 **19.3%**，Get 约为 upstream 的
+  **4.10 倍耗时**。
 
 ### 内存分配
 
 表格单元格式为 `B/op · allocs/op`：
 
-| Benchmark | Local default | Local `sonic_stdjson` | Local JSON v2 implementation | Upstream Go 1.26.7 |
+| Benchmark | Local default | Local `sonic_stdjson` | Local `sonic_jsonv2` | Upstream Go 1.26.7 |
 |---|---:|---:|---:|---:|
 | Marshal small struct | 496 · 5 | 496 · 5 | 336 · 3 | **268 · 3** |
-| Unmarshal medium map | 4,876 · 147 | 4,876 · 147 | 4,940 · 148 | 5,402 · 59 |
+| Unmarshal medium map | 4,877 · 147 | 4,876 · 147 | 4,940 · 148 | 5,402 · 59 |
 | Valid medium JSON | 0 · 0 | 0 · 0 | 0 · 0 | 0 · 0 |
-| Get nested path | 148 · 2 | 148 · 2 | 148 · 2 | **40 · 2** |
+| Get nested path | 164 · 2 | 164 · 2 | 164 · 2 | **40 · 2** |
 
 本次结果显示：使用 Go 1.26.7 原生路径的 upstream Sonic 在四项时间指标上都
-更快，且 Marshal/Get 的分配量更低。本地三种模式中，`sonic_stdjson` 的
-Marshal 中位数最低，default 的 Unmarshal/Get 最低，JSON v2 implementation 的
-Valid 最低并减少了 Marshal 分配。本次只运行 3 轮且单轮波动明显，适合作为开发期
-横向参考，不应直接作为发布级性能承诺。
+更快，且 Marshal/Get 的分配量更低。本地三种模式中，`sonic_jsonv2` 的
+Marshal、Unmarshal 中位数最低，`sonic_stdjson` 的 Valid 最低，default 的 Get 最低。本次仅有 3 个样本，
+且 local 与 upstream 跨 Go 工具链；结果会受硬件、系统负载和 Go 版本影响，适合作为
+开发期横向参考，不应直接作为发布级性能承诺。
 
 ### 复现命令
 
@@ -204,59 +212,19 @@ Valid 最低并减少了 Marshal 分配。本次只运行 3 轮且单轮波动�
 
 ```powershell
 Push-Location .\bench
-
-# Local benchmark 使用当前项目工具链；应输出 go1.27.x。
-go version
-
-# Local root / default
-go test -mod=readonly '-modfile=go.local.mod' -run '^$' -bench '.' -benchmem -count=3 ./rootbench
-
-# Local root / strict standard JSON
-go test -mod=readonly '-modfile=go.local.mod' -tags sonic_stdjson -run '^$' -bench '.' -benchmem -count=3 ./rootbench
-
-# Local root / JSON v2 tag
-$hadExperiment = Test-Path Env:GOEXPERIMENT
-$oldExperiment = $env:GOEXPERIMENT
-$hadToolchain = Test-Path Env:GOTOOLCHAIN
-$oldToolchain = $env:GOTOOLCHAIN
 try {
-    $env:GOEXPERIMENT = 'jsonv2'
-    go test -mod=readonly '-modfile=go.local.mod' -tags sonic_jsonv2 -run '^$' -bench '.' -benchmem -count=3 ./rootbench
+    pwsh -NoProfile -File .\run.ps1
 }
 finally {
-    if ($hadExperiment) {
-        $env:GOEXPERIMENT = $oldExperiment
-    }
-    else {
-        Remove-Item Env:GOEXPERIMENT -ErrorAction SilentlyContinue
-    }
+    Pop-Location
 }
-
-# Upstream Sonic v1.15.2
-try {
-    $env:GOTOOLCHAIN = 'go1.26.7'
-    Remove-Item Env:GOEXPERIMENT -ErrorAction SilentlyContinue
-    go test -mod=readonly -run '^$' -bench '.' -benchmem -count=3 ./rootbench
-}
-finally {
-    if ($hadExperiment) {
-        $env:GOEXPERIMENT = $oldExperiment
-    }
-    else {
-        Remove-Item Env:GOEXPERIMENT -ErrorAction SilentlyContinue
-    }
-    if ($hadToolchain) {
-        $env:GOTOOLCHAIN = $oldToolchain
-    }
-    else {
-        Remove-Item Env:GOTOOLCHAIN -ErrorAction SilentlyContinue
-    }
-}
-
-Pop-Location
 ```
 
-benchmark payload 和更详细的模块说明见 [`bench/README.md`](bench/README.md)。
+runner 对四个 block 强制 `GOPROXY=off`，在每次 benchmark 前验证环境和实际 `go`
+命令结果并打印 `PROOF:` 行，并在成功或失败时恢复调用者的 `GOPROXY`、
+`GOEXPERIMENT` 和 `GOTOOLCHAIN`。它要求 upstream Go 1.26.7 toolchain 和所有
+module 已缓存。benchmark payload 和更详细的模块说明见
+[`bench/README.md`](bench/README.md)。
 
 ## 测试与验证
 
@@ -288,10 +256,17 @@ finally {
 
 ### Bounded fuzz 矩阵
 
-2026-08-24 的发布前验证顺序运行了全部 18 个 fuzz target：root 4 个、AST 3 个、
+2026-08-24 的历史发布前验证顺序运行了全部 18 个 fuzz target：root 4 个、AST 3 个、
 decoder 2 个、encoder 4 个、unquote 2 个、utf8 2 个，以及 upstream differential
 1 个。常规 target 使用 `-fuzztime=5s -parallel=4`；昂贵的 differential target
-使用 `-fuzztime=120s -parallel=1`，完成 38 个 baseline corpus 后进入随机变异。
+使用 `-fuzztime=120s -parallel=1`。当时报告的 38 个 baseline 是运行时计数，包含
+本机 fuzz cache，不能当作当前 checkout 中提交的 corpus 数量。
+
+当前 checkout 中提交的 fuzz corpus 总数为 7：root Valid 1 个、AST roundtrip 1 个、differential 5 个。
+其中 `testdata/fuzz/FuzzValidParity/`、`ast/testdata/fuzz/FuzzASTRoundTrip/` 和
+`difftest/testdata/fuzz/FuzzUpstreamSonicParity/` 分别提交了 1、1 和 5 个 corpus 文件。
+differential harness 源码内置 10 个 `f.Add` seed；这些可复现输入与历史运行时的 38
+baseline 是不同的计数口径。
 
 此外，`FuzzValidParity` 和 `FuzzGetNoPanic` 分别在 `sonic_stdjson` 与
 `sonic_jsonv2` 下运行 5 秒。该轮测试发现并修正了 `sonic_jsonv2` 仍使用默认

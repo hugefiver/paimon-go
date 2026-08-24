@@ -130,9 +130,12 @@ func TestEncodeIntoPreservesExistingContent(t *testing.T) {
 }
 
 func TestEncodeIntoNilBuffer(t *testing.T) {
-	if err := EncodeInto(nil, "hello", 0); err == nil {
-		t.Fatalf("expected error on nil buffer")
-	}
+	defer func() {
+		if got := recover(); got != "user-supplied buffer buf is nil" {
+			t.Fatalf("EncodeInto(nil, ...) panic = %#v; want exact upstream literal", got)
+		}
+	}()
+	_ = EncodeInto(nil, "hello", 0)
 }
 
 func TestEncodeIntoFailureLeavesBufferUntouched(t *testing.T) {
@@ -334,6 +337,24 @@ func TestEncoderSetIndent(t *testing.T) {
 	}
 }
 
+func TestEncoderSetPrefixOnlyIndent(t *testing.T) {
+	enc := &Encoder{}
+	enc.SetIndent("P", "")
+
+	got, err := enc.Encode(map[string]int{"a": 1})
+	if err != nil {
+		t.Fatalf("Encode error = %v", err)
+	}
+	const want = "{\nP\"a\": 1\nP}\n"
+	if string(got) != want {
+		t.Fatalf("prefix-only SetIndent output = %q, want %q", got, want)
+	}
+	withoutPrefix := bytes.ReplaceAll(got, []byte("\nP"), []byte("\n"))
+	if !json.Valid(withoutPrefix) {
+		t.Fatalf("prefix-stripped output is invalid JSON: %q", withoutPrefix)
+	}
+}
+
 func TestEncoderSetCompactMarshaler(t *testing.T) {
 	enc := &Encoder{}
 	enc.SetCompactMarshaler(true)
@@ -455,12 +476,12 @@ func TestStreamEncoderWithIndent(t *testing.T) {
 		t.Fatalf("Encode error = %v", err)
 	}
 	got := buf.String()
-	if !strings.Contains(got, "\n  ") {
-		t.Fatalf("expected indented output, got %s", got)
+	const want = "{\n  \"a\": 1\n}\n"
+	if got != want {
+		t.Fatalf("indented stream output = %q, want %q", got, want)
 	}
-	// Trailing newline still appended.
-	if !strings.HasSuffix(got, "\n") {
-		t.Fatalf("expected trailing newline, got %q", got)
+	if !json.Valid([]byte(got)) {
+		t.Fatalf("indented stream output is invalid JSON: %q", got)
 	}
 }
 

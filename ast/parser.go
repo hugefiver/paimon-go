@@ -25,12 +25,85 @@ func (p *Parser) Parse() (Node, nativetypes.ParsingError) {
 	if p == nil {
 		return Node{typ: V_ERROR, exists: true, loaded: true, err: fmt.Errorf("nil parser")}, nativetypes.ERR_INVALID_CHAR
 	}
-	node, code := parseRawToNodeEx(p.src)
-	if code != 0 {
-		p.pos = locateErrorOffset(p.src, code)
-		return Node{typ: V_ERROR, exists: true, loaded: true, err: code}, code
+
+	attemptPos := p.pos
+	start := skipJSONSpaceString(p.src, attemptPos)
+	if start == len(p.src) {
+		return parserErrorNode(nativetypes.ERR_EOF)
 	}
+
+	switch p.src[start] {
+	case '[', '{':
+		return p.parseContainer(start)
+	}
+
+	end, ok := scanFirstValueEnd(p.src, start)
+	if !ok {
+		return parserErrorNode(parserTokenError(p.src, start))
+	}
+	node, code := parseRawToNodeEx(p.src[start:end])
+	if code != 0 {
+		// A bare exponent is accepted when its source terminator made the
+		// token scannable. Preserve that local-parser compatibility without
+		// including the following token in this incremental parse.
+		if validScannedRootRaw(p.src, start, end) && isBareExponent(p.src[start:end]) {
+			p.pos = end
+			return NewNumber(p.src[start:end]), 0
+		}
+		return parserErrorNode(code)
+	}
+	p.pos = end
 	return node, 0
+}
+
+// parseContainer returns an independently lazy node. A non-empty container
+// leaves Parser at its first interior byte, while an empty one consumes its
+// closer so callers can continue with the next top-level token.
+func (p *Parser) parseContainer(start int) (Node, nativetypes.ParsingError) {
+	typ, closer := V_ARRAY, byte(']')
+	if p.src[start] == '{' {
+		typ, closer = V_OBJECT, '}'
+	}
+	p.pos = start + 1
+	interior := skipJSONSpaceString(p.src, p.pos)
+	if interior < len(p.src) && p.src[interior] == closer {
+		p.pos = interior + 1
+		if typ == V_ARRAY {
+			return NewArray(nil), 0
+		}
+		return NewObject(nil), 0
+	}
+
+	if end, ok := scanFirstValueEnd(p.src, start); ok {
+		return newParserContainerNode(p.src[start:end], typ), 0
+	}
+	return newParserContainerNode(p.src[start:], typ), 0
+}
+
+func newParserContainerNode(raw string, typ int) Node {
+	return Node{typ: typ, exists: true, loaded: false, raw: raw}
+}
+
+func parserErrorNode(code nativetypes.ParsingError) (Node, nativetypes.ParsingError) {
+	return Node{typ: V_ERROR, exists: true, loaded: true, err: code}, code
+}
+
+func parserTokenError(src string, start int) nativetypes.ParsingError {
+	switch c := src[start]; {
+	case c == '"', c == '-', c >= '0' && c <= '9', c == 't', c == 'f', c == 'n':
+		_, code := parseRawToNodeEx(src[start:])
+		return code
+	default:
+		return nativetypes.ERR_INVALID_CHAR
+	}
+}
+
+func isBareExponent(raw string) bool {
+	if len(raw) == 0 {
+		return false
+	}
+	last := raw[len(raw)-1]
+	return last == 'e' || last == 'E'
 }
 
 // ExportError converts a ParsingError code returned by Parse into an
@@ -40,9 +113,6 @@ func (p *Parser) ExportError(code nativetypes.ParsingError) error {
 		return nil
 	}
 	pos := p.pos
-	if pos == 0 {
-		pos = locateErrorOffset(p.src, code)
-	}
 	src := p.src
 	if len(src) > 64 {
 		src = src[:32] + "..." + src[len(src)-29:]
@@ -243,32 +313,4 @@ func mapFastjsonError(src string, err error) nativetypes.ParsingError {
 		return nativetypes.ERR_INVALID_UNICODE
 	}
 	return nativetypes.ERR_INVALID_CHAR
-}
-
-// locateErrorOffset returns a best-effort byte offset in src where a
-// parse error of the given code occurred. fastjson does not surface the
-// offset directly, so this falls back to scanning for the first
-// "obviously wrong" character; if none is found it returns len(src).
-func locateErrorOffset(src string, code nativetypes.ParsingError) int {
-	for i := 0; i < len(src); i++ {
-		c := src[i]
-		switch code {
-		case nativetypes.ERR_MISMATCH:
-			if c == '}' || c == ']' {
-				return i
-			}
-		case nativetypes.ERR_INVALID_CHAR:
-			if c < 0x20 && c != ' ' && c != '\t' && c != '\n' && c != '\r' {
-				return i
-			}
-		}
-	}
-	// Default to end-of-source for ERR_EOF and unknown codes.
-	if code == nativetypes.ERR_EOF {
-		return len(src)
-	}
-	if len(src) == 0 {
-		return 0
-	}
-	return len(src) - 1
 }

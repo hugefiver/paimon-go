@@ -121,6 +121,26 @@ func TestRootGetAndNoCopyRawMessage(t *testing.T) {
 	}
 }
 
+func TestNoCopyRawMessageNilMarshalEncodesNull(t *testing.T) {
+	var raw NoCopyRawMessage
+
+	direct, err := raw.MarshalJSON()
+	if err != nil {
+		t.Fatalf("NoCopyRawMessage.MarshalJSON() error = %v", err)
+	}
+	if got := string(direct); got != "null" {
+		t.Fatalf("NoCopyRawMessage.MarshalJSON() = %q, want null", got)
+	}
+
+	encoded, err := Marshal(raw)
+	if err != nil {
+		t.Fatalf("Marshal(nil NoCopyRawMessage) error = %v", err)
+	}
+	if got := string(encoded); got != "null" {
+		t.Fatalf("Marshal(nil NoCopyRawMessage) = %q, want null", got)
+	}
+}
+
 func TestRootGetEscapedObjectKey(t *testing.T) {
 	for _, tt := range []struct {
 		json string

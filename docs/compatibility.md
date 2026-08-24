@@ -14,7 +14,12 @@ After replacing, code importing `github.com/bytedance/sonic` and the covered
 subpackages continues to compile against the same public API surface, subject
 to the behavioral differences below.
 
-The intended source-publication location is https://github.com/hugefiver/paimon-go, but it is currently empty and is not an installable source. Consumers currently use a local-directory replace to an existing checkout; clone instructions become valid only after separately authorized source publication, and the module directive remains github.com/bytedance/sonic.
+Source is published at https://github.com/hugefiver/paimon-go and can be
+checked out with `git clone https://github.com/hugefiver/paimon-go.git`.
+Consumers still use a local-directory replace to that checkout, because the
+module directive remains `github.com/bytedance/sonic`. Keep importing
+`github.com/bytedance/sonic`; do not use `github.com/hugefiver/paimon-go` as a
+Go module import or install target.
 
 ## API coverage and scope
 
@@ -86,10 +91,7 @@ adapter described above.
 ### `fastjson` subpackage
 
 `github.com/bytedance/sonic/fastjson` is a thin wrapper around the root
-package. Its exported types are aliases of root package types, and its
-functions forward to root functions. It exists so source code that explicitly
-imports Sonic's `fastjson` path continues to compile and sees the same
-behavior as the root backend selected by the current build tags.
+package. Its exported types are aliases of root package types. Package-level encode, decode, and validation helpers use the separately assignable `fastjson.ConfigDefault`; `Get*` and `Pretouch*` forward to the root package. It exists so source code that explicitly imports Sonic's `fastjson` path continues to compile and sees the same behavior as the root backend selected by the current build tags, except where its separately assignable configuration is intentionally selected.
 
 ### `stdjsonv2` subpackage
 
@@ -111,8 +113,7 @@ The fastjson and stdjsonv2 subpackages are retained for existing-source compatib
 - Root `Valid` accepts raw control bytes inside strings by default, root
   `Unmarshal` normalizes those raw control bytes before the `encoding/json`
   fallback, and empty-path root `Get` returns the first complete JSON value while
-  ignoring trailing garbage. This matches observed upstream Sonic behavior for
-  these hot paths.
+  ignoring trailing garbage. This local `Valid`/`Unmarshal` acceptance is an intentional divergence from the Go 1.27 upstream Sonic fallback, while both implementations' raw AST entry points agree on the raw value.
 - Build with `-tags sonic_stdjson` to force strict `encoding/json`-style
   behavior. Under that tag, root `Valid`, `Unmarshal`, and `Get` reject inputs
   that `encoding/json` rejects, including raw control bytes inside strings and
