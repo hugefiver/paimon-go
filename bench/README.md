@@ -32,7 +32,7 @@ upstream toolchain 必须已经缓存，cache miss 会失败而不会下载。
 pwsh -NoProfile -File .\run.ps1
 ```
 
-runner 会串行执行四个 block，每项 benchmark 运行 3 次并输出内存分配：
+runner 会串行执行四个 block，每项 benchmark 串行运行 5 次并输出内存分配：
 
 - `=== local root sonic/default ===`
 - `=== local root stdjson tag ===`
@@ -51,29 +51,91 @@ runner 在 local JSON v2 block 临时设置 `GOEXPERIMENT=jsonv2`，在 upstream
 
 ## 手动命令
 
-下列命令应在离线环境运行；可在包住单个命令的 `try`/`finally` 中临时设置
-`$env:GOPROXY = 'off'` 并恢复调用者原值。使用 runner 可自动完成该恢复。
+下列命令均在离线环境运行。每个示例使用 `try`/`finally` 临时设置
+`$env:GOPROXY = 'off'`，并精确恢复调用者原有环境变量的存在性和值。使用 runner
+可自动完成相同恢复。
 
 ### Local root/default
 
 ```powershell
-go test -mod=readonly '-modfile=go.local.mod' -run '^$' -bench '.' -benchmem -count=3 ./rootbench
+$hadProxy = Test-Path Env:GOPROXY
+$oldProxy = $env:GOPROXY
+try {
+    $env:GOPROXY = 'off'
+    $arguments = @(
+        'test',
+        '-mod=readonly',
+        '-modfile=go.local.mod',
+        '-run=^$',
+        '-bench=.',
+        '-benchmem',
+        '-count=5',
+        './rootbench'
+    )
+    & go @arguments
+}
+finally {
+    if ($hadProxy) {
+        $env:GOPROXY = $oldProxy
+    }
+    else {
+        Remove-Item Env:GOPROXY -ErrorAction SilentlyContinue
+    }
+}
 ```
 
 ### Local root/strict
 
 ```powershell
-go test -mod=readonly '-modfile=go.local.mod' -tags sonic_stdjson -run '^$' -bench '.' -benchmem -count=3 ./rootbench
+$hadProxy = Test-Path Env:GOPROXY
+$oldProxy = $env:GOPROXY
+try {
+    $env:GOPROXY = 'off'
+    $arguments = @(
+        'test',
+        '-mod=readonly',
+        '-modfile=go.local.mod',
+        '-tags=sonic_stdjson',
+        '-run=^$',
+        '-bench=.',
+        '-benchmem',
+        '-count=5',
+        './rootbench'
+    )
+    & go @arguments
+}
+finally {
+    if ($hadProxy) {
+        $env:GOPROXY = $oldProxy
+    }
+    else {
+        Remove-Item Env:GOPROXY -ErrorAction SilentlyContinue
+    }
+}
 ```
 
 ### Local root/JSON v2
 
 ```powershell
+$hadProxy = Test-Path Env:GOPROXY
+$oldProxy = $env:GOPROXY
 $hadExperiment = Test-Path Env:GOEXPERIMENT
 $oldExperiment = $env:GOEXPERIMENT
 try {
+    $env:GOPROXY = 'off'
     $env:GOEXPERIMENT = 'jsonv2'
-    go test -mod=readonly '-modfile=go.local.mod' -tags sonic_jsonv2 -run '^$' -bench '.' -benchmem -count=3 ./rootbench
+    $arguments = @(
+        'test',
+        '-mod=readonly',
+        '-modfile=go.local.mod',
+        '-tags=sonic_jsonv2',
+        '-run=^$',
+        '-bench=.',
+        '-benchmem',
+        '-count=5',
+        './rootbench'
+    )
+    & go @arguments
 }
 finally {
     if ($hadExperiment) {
@@ -82,20 +144,38 @@ finally {
     else {
         Remove-Item Env:GOEXPERIMENT -ErrorAction SilentlyContinue
     }
+    if ($hadProxy) {
+        $env:GOPROXY = $oldProxy
+    }
+    else {
+        Remove-Item Env:GOPROXY -ErrorAction SilentlyContinue
+    }
 }
 ```
 
 ### Upstream Sonic v1.15.2 / Go 1.26.7
 
 ```powershell
+$hadProxy = Test-Path Env:GOPROXY
+$oldProxy = $env:GOPROXY
 $hadToolchain = Test-Path Env:GOTOOLCHAIN
 $oldToolchain = $env:GOTOOLCHAIN
 $hadExperiment = Test-Path Env:GOEXPERIMENT
 $oldExperiment = $env:GOEXPERIMENT
 try {
+    $env:GOPROXY = 'off'
     $env:GOTOOLCHAIN = 'go1.26.7'
     Remove-Item Env:GOEXPERIMENT -ErrorAction SilentlyContinue
-    go test -mod=readonly -run '^$' -bench '.' -benchmem -count=3 ./rootbench
+    $arguments = @(
+        'test',
+        '-mod=readonly',
+        '-run=^$',
+        '-bench=.',
+        '-benchmem',
+        '-count=5',
+        './rootbench'
+    )
+    & go @arguments
 }
 finally {
     if ($hadToolchain) {
@@ -109,6 +189,12 @@ finally {
     }
     else {
         Remove-Item Env:GOEXPERIMENT -ErrorAction SilentlyContinue
+    }
+    if ($hadProxy) {
+        $env:GOPROXY = $oldProxy
+    }
+    else {
+        Remove-Item Env:GOPROXY -ErrorAction SilentlyContinue
     }
 }
 ```

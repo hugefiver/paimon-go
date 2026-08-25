@@ -77,7 +77,7 @@ try {
         "-run=^$",
         "-bench=.",
         "-benchmem",
-        "-count=3",
+        "-count=5",
         "./rootbench"
     )
 
@@ -89,7 +89,7 @@ try {
         "-run=^$",
         "-bench=.",
         "-benchmem",
-        "-count=3",
+        "-count=5",
         "./rootbench"
     )
 
@@ -102,7 +102,7 @@ try {
         "-run=^$",
         "-bench=.",
         "-benchmem",
-        "-count=3",
+        "-count=5",
         "./rootbench"
     )
 
@@ -119,7 +119,7 @@ try {
         "-run=^$",
         "-bench=.",
         "-benchmem",
-        "-count=3",
+        "-count=5",
         "./rootbench"
     )
 } finally {

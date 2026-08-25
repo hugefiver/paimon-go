@@ -8,6 +8,7 @@ import (
 	"math"
 	"sort"
 	"strconv"
+	"sync"
 
 	nativetypes "github.com/bytedance/sonic/internal/native/types"
 )
@@ -87,11 +88,17 @@ func NewRaw(j string) Node {
 	return Node{typ: typ, exists: true, raw: raw}
 }
 
-// NewRawConcurrentRead is identical to NewRaw. The Sonic v1.15.2 surface
-// accepts a flag that enables concurrent reads on the raw buffer; the
-// fastjson-backed implementation always deep-copies on load so the
-// distinction is preserved only as a separate constructor name.
-func NewRawConcurrentRead(j string) Node { return NewRaw(j) }
+// NewRawConcurrentRead builds a lazy raw node whose first materialization is
+// safe for concurrent pointer-receiver readers. Type, IsRaw, Error, and all
+// mutations remain outside that concurrent-read contract. It allocates a mutex
+// only when NewRaw produced a valid lazy node.
+func NewRawConcurrentRead(j string) Node {
+	node := NewRaw(j)
+	if node.isRawUnlocked() {
+		node.mu = &sync.RWMutex{}
+	}
+	return node
+}
 
 // NewBytes builds a string Node whose value is the base64 (RFC 4648)
 // encoding of src. This mirrors Sonic's NewBytes, which produces a JSON
@@ -124,6 +131,8 @@ func NewAny(v interface{}) Node {
 
 // Type returns the node's type tag. Unloaded raw nodes report the type of
 // their root JSON token. Absent nodes return V_NONE.
+//
+// Deprecated: not concurrent safe. Use TypeSafe instead.
 func (n Node) Type() int { return n.typ }
 
 // TypeSafe is identical to Type for this implementation; it is kept on
@@ -134,6 +143,8 @@ func (n *Node) TypeSafe() int {
 	if n == nil {
 		return V_NONE
 	}
+	n.lockRead()
+	defer n.unlockRead()
 	return n.typ
 }
 
@@ -144,6 +155,8 @@ func (n *Node) Exists() bool {
 	if n == nil {
 		return false
 	}
+	n.lockRead()
+	defer n.unlockRead()
 	return n.typ != V_ERROR && n.typ != V_NONE
 }
 
@@ -154,15 +167,20 @@ func (n *Node) Valid() bool {
 	if n == nil {
 		return false
 	}
+	n.lockRead()
+	defer n.unlockRead()
 	return n.typ != V_ERROR
 }
 
 // IsRaw reports whether the node is an unloaded raw JSON node.
+//
+// Deprecated: not concurrent safe.
 func (n Node) IsRaw() bool { return !n.loaded && n.raw != "" }
 
 // Error returns the node's error string. For an absent node it is empty
 // (Sonic semantics); for an error node it is the underlying error's
-// message; otherwise it is empty.
+// message; otherwise it is empty. Like Sonic's value-receiver Error method,
+// it is not concurrent safe.
 func (n Node) Error() string {
 	if !n.exists {
 		return ""
@@ -178,6 +196,12 @@ func (n *Node) Check() error {
 	if n == nil {
 		return ErrNotExist
 	}
+	n.lockRead()
+	defer n.unlockRead()
+	return n.checkUnlocked()
+}
+
+func (n *Node) checkUnlocked() error {
 	if n.typ != V_ERROR {
 		return nil
 	}
@@ -204,13 +228,19 @@ func (n *Node) LoadAll() error {
 	if n == nil {
 		return ErrNotExist
 	}
-	if n.typ == V_ERROR {
-		if n.err != nil {
-			return n.err
-		}
-		return n
+	if n.mu == nil {
+		return n.loadAllUnlocked()
 	}
-	if !n.IsRaw() {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.loadAllUnlocked()
+}
+
+func (n *Node) loadAllUnlocked() error {
+	if err := n.checkUnlocked(); err != nil {
+		return err
+	}
+	if !n.isRawUnlocked() {
 		return nil
 	}
 	parsed, perr := parseRawToNode(n.raw)
@@ -220,8 +250,22 @@ func (n *Node) LoadAll() error {
 		n.err = perr
 		return perr
 	}
-	*n = parsed
+	assignLoaded(n, &parsed)
 	return nil
+}
+
+func assignLoaded(dst, src *Node) {
+	dst.typ = src.typ
+	dst.exists = src.exists
+	dst.loaded = src.loaded
+	dst.boolv = src.boolv
+	dst.raw = src.raw
+	dst.str = src.str
+	dst.num = src.num
+	dst.arr = src.arr
+	dst.obj = src.obj
+	dst.any = src.any
+	dst.err = src.err
 }
 
 // ---------------------------------------------------------------------------
@@ -232,11 +276,14 @@ func (n *Node) LoadAll() error {
 // follows Sonic: JSON booleans; numbers (non-zero -> true); the strings
 // "true"/"false"; null -> false.
 func (n *Node) Bool() (bool, error) {
-	if n == nil || !n.exists {
+	if n == nil {
 		return false, ErrNotExist
 	}
 	if err := n.ensureLoaded(); err != nil {
 		return false, err
+	}
+	if !n.exists {
+		return false, ErrNotExist
 	}
 	switch n.typ {
 	case V_TRUE:
@@ -272,11 +319,14 @@ func (n *Node) Bool() (bool, error) {
 // StrictBool returns the boolean value but only if the node is a real
 // JSON boolean.
 func (n *Node) StrictBool() (bool, error) {
-	if n == nil || !n.exists {
+	if n == nil {
 		return false, ErrNotExist
 	}
 	if err := n.ensureLoaded(); err != nil {
 		return false, err
+	}
+	if !n.exists {
+		return false, ErrNotExist
 	}
 	switch n.typ {
 	case V_TRUE:
@@ -294,11 +344,14 @@ func (n *Node) StrictBool() (bool, error) {
 // number parses only as float); numeric strings; true -> 1, false/null
 // -> 0.
 func (n *Node) Int64() (int64, error) {
-	if n == nil || !n.exists {
+	if n == nil {
 		return 0, ErrNotExist
 	}
 	if err := n.ensureLoaded(); err != nil {
 		return 0, err
+	}
+	if !n.exists {
+		return 0, ErrNotExist
 	}
 	switch n.typ {
 	case V_NUMBER:
@@ -332,11 +385,14 @@ func (n *Node) Int64() (int64, error) {
 // StrictInt64 returns the int64 value but only if the node is a JSON
 // number whose numeric value is an integer.
 func (n *Node) StrictInt64() (int64, error) {
-	if n == nil || !n.exists {
+	if n == nil {
 		return 0, ErrNotExist
 	}
 	if err := n.ensureLoaded(); err != nil {
 		return 0, err
+	}
+	if !n.exists {
+		return 0, ErrNotExist
 	}
 	if n.typ == V_ANY {
 		return anyStrictInt64(n.any)
@@ -351,11 +407,14 @@ func (n *Node) StrictInt64() (int64, error) {
 // follows Sonic: JSON numbers; numeric strings; true -> 1, false/null
 // -> 0.
 func (n *Node) Float64() (float64, error) {
-	if n == nil || !n.exists {
+	if n == nil {
 		return 0, ErrNotExist
 	}
 	if err := n.ensureLoaded(); err != nil {
 		return 0, err
+	}
+	if !n.exists {
+		return 0, ErrNotExist
 	}
 	switch n.typ {
 	case V_NUMBER:
@@ -379,11 +438,14 @@ func (n *Node) Float64() (float64, error) {
 // StrictFloat64 returns the float64 value but only if the node is a JSON
 // number.
 func (n *Node) StrictFloat64() (float64, error) {
-	if n == nil || !n.exists {
+	if n == nil {
 		return 0, ErrNotExist
 	}
 	if err := n.ensureLoaded(); err != nil {
 		return 0, err
+	}
+	if !n.exists {
+		return 0, ErrNotExist
 	}
 	if n.typ == V_ANY {
 		return anyStrictFloat64(n.any)
@@ -398,11 +460,14 @@ func (n *Node) StrictFloat64() (float64, error) {
 // follows Sonic: JSON numbers; numeric strings; true -> "1", false/null
 // -> "0".
 func (n *Node) Number() (json.Number, error) {
-	if n == nil || !n.exists {
+	if n == nil {
 		return "", ErrNotExist
 	}
 	if err := n.ensureLoaded(); err != nil {
 		return "", err
+	}
+	if !n.exists {
+		return "", ErrNotExist
 	}
 	switch n.typ {
 	case V_NUMBER:
@@ -428,11 +493,14 @@ func (n *Node) Number() (json.Number, error) {
 // StrictNumber returns the json.Number but only if the node is a JSON
 // number.
 func (n *Node) StrictNumber() (json.Number, error) {
-	if n == nil || !n.exists {
+	if n == nil {
 		return "", ErrNotExist
 	}
 	if err := n.ensureLoaded(); err != nil {
 		return "", err
+	}
+	if !n.exists {
+		return "", ErrNotExist
 	}
 	if n.typ == V_ANY {
 		return anyStrictNumber(n.any)
@@ -446,11 +514,14 @@ func (n *Node) StrictNumber() (json.Number, error) {
 // String returns the node's string value. Non-strict conversion accepts
 // JSON strings, numbers, and booleans; null returns "".
 func (n *Node) String() (string, error) {
-	if n == nil || !n.exists {
+	if n == nil {
 		return "", ErrNotExist
 	}
 	if err := n.ensureLoaded(); err != nil {
 		return "", err
+	}
+	if !n.exists {
+		return "", ErrNotExist
 	}
 	switch n.typ {
 	case V_STRING:
@@ -472,11 +543,14 @@ func (n *Node) String() (string, error) {
 // StrictString returns the string value but only if the node is a JSON
 // string.
 func (n *Node) StrictString() (string, error) {
-	if n == nil || !n.exists {
+	if n == nil {
 		return "", ErrNotExist
 	}
 	if err := n.ensureLoaded(); err != nil {
 		return "", err
+	}
+	if !n.exists {
+		return "", ErrNotExist
 	}
 	if n.typ == V_ANY {
 		return anyStrictString(n.any)
@@ -778,11 +852,17 @@ func anyStrictString(v interface{}) (string, error) {
 // length of a string node, and 0 for absent/null nodes (Sonic
 // semantics).
 func (n *Node) Len() (int, error) {
-	if n == nil || !n.exists {
+	if n == nil {
 		return 0, ErrNotExist
 	}
 	if err := n.ensureLoaded(); err != nil {
 		return 0, err
+	}
+	if n.typ == V_NONE || n.typ == V_NULL {
+		return 0, nil
+	}
+	if !n.exists {
+		return 0, ErrNotExist
 	}
 	switch n.typ {
 	case V_ARRAY:
@@ -791,8 +871,6 @@ func (n *Node) Len() (int, error) {
 		return len(n.obj), nil
 	case V_STRING:
 		return len(n.str), nil
-	case V_NONE, V_NULL:
-		return 0, nil
 	}
 	return 0, fmt.Errorf("node type %d has no length", n.typ)
 }
@@ -825,7 +903,7 @@ func (n *Node) Cap() (int, error) {
 // The returned pointer aliases the node's internal storage and is
 // invalidated by mutations that reallocate the underlying slice.
 func (n *Node) Get(key string) *Node {
-	if n == nil || !n.exists {
+	if n == nil {
 		return newMissing()
 	}
 	if err := n.Check(); err != nil {
@@ -833,6 +911,9 @@ func (n *Node) Get(key string) *Node {
 	}
 	if err := n.ensureLoaded(); err != nil {
 		return newErrorNode(err)
+	}
+	if !n.exists {
+		return newMissing()
 	}
 	if n.typ == V_OBJECT {
 		for i := range n.obj {
@@ -850,7 +931,7 @@ func (n *Node) Get(key string) *Node {
 // container kinds are indexable). Positive out-of-range array indices
 // return nil, while object indices return an ErrNotExist error node.
 func (n *Node) Index(idx int) *Node {
-	if n == nil || !n.exists {
+	if n == nil {
 		return newMissing()
 	}
 	if err := n.Check(); err != nil {
@@ -858,6 +939,9 @@ func (n *Node) Index(idx int) *Node {
 	}
 	if err := n.ensureLoaded(); err != nil {
 		return newErrorNode(err)
+	}
+	if !n.exists {
+		return newMissing()
 	}
 	switch n.typ {
 	case V_ARRAY:
@@ -885,7 +969,7 @@ func (n *Node) Index(idx int) *Node {
 func (n *Node) GetByPath(path ...interface{}) *Node {
 	cur := n
 	for _, step := range path {
-		if cur == nil || !cur.exists {
+		if cur == nil {
 			return newMissing()
 		}
 		switch s := step.(type) {
@@ -916,11 +1000,14 @@ func (n *Node) GetByPath(path ...interface{}) *Node {
 // trying to match the idx-th pair's key (Sonic semantics: object-only
 // lookup).
 func (n *Node) IndexOrGet(idx int, key string) *Node {
-	if n == nil || !n.exists {
+	if n == nil {
 		return newMissing()
 	}
 	if err := n.ensureLoaded(); err != nil {
 		return newErrorNode(err)
+	}
+	if !n.exists {
+		return newMissing()
 	}
 	if n.typ != V_OBJECT {
 		return newMissing()
@@ -940,23 +1027,21 @@ func (n *Node) IndexOrGet(idx int, key string) *Node {
 // position of the child in the parent's underlying slice, or -1 when
 // the child is not present.
 func (n *Node) IndexOrGetWithIdx(idx int, key string) (*Node, int) {
-	if n == nil || !n.exists {
+	if n == nil {
 		return newMissing(), -1
 	}
 	if err := n.ensureLoaded(); err != nil {
 		return newErrorNode(err), -1
 	}
-	if n.typ == V_ARRAY {
-		if idx < 0 || idx >= len(n.arr) {
-			return newMissing(), -1
-		}
-		return &n.arr[idx], idx
+	if !n.exists {
+		return newMissing(), -1
 	}
-	if n.typ == V_OBJECT {
-		for i := range n.obj {
-			if n.obj[i].Key == key {
-				return &n.obj[i].Value, i
-			}
+	if n.typ != V_OBJECT {
+		return newErrorNode(ErrUnsupportType), idx
+	}
+	for i := range n.obj {
+		if n.obj[i].Key == key {
+			return &n.obj[i].Value, i
 		}
 	}
 	return newMissing(), -1
@@ -964,10 +1049,13 @@ func (n *Node) IndexOrGetWithIdx(idx int, key string) (*Node, int) {
 
 // IndexPair returns a pointer to the i-th Pair of an object node.
 func (n *Node) IndexPair(idx int) *Pair {
-	if n == nil || !n.exists {
+	if n == nil {
 		return nil
 	}
 	if err := n.ensureLoaded(); err != nil {
+		return nil
+	}
+	if !n.exists {
 		return nil
 	}
 	if n.typ != V_OBJECT {
@@ -989,9 +1077,6 @@ func (n *Node) IndexPair(idx int) *Pair {
 func (n *Node) ForEach(fn Scanner) error {
 	if err := n.Check(); err != nil {
 		return err
-	}
-	if !n.exists {
-		return ErrNotExist
 	}
 	if err := n.ensureLoaded(); err != nil {
 		return err
@@ -1021,11 +1106,14 @@ func (n *Node) ForEach(fn Scanner) error {
 
 // Values returns a ListIterator over an array node's children.
 func (n *Node) Values() (ListIterator, error) {
-	if n == nil || !n.exists {
+	if n == nil {
 		return ListIterator{}, ErrNotExist
 	}
 	if err := n.ensureLoaded(); err != nil {
 		return ListIterator{}, err
+	}
+	if !n.exists {
+		return ListIterator{}, ErrNotExist
 	}
 	if n.typ != V_ARRAY {
 		return ListIterator{}, fmt.Errorf("node type %d is not an array", n.typ)
@@ -1035,11 +1123,14 @@ func (n *Node) Values() (ListIterator, error) {
 
 // Properties returns an ObjectIterator over an object node's pairs.
 func (n *Node) Properties() (ObjectIterator, error) {
-	if n == nil || !n.exists {
+	if n == nil {
 		return ObjectIterator{}, ErrNotExist
 	}
 	if err := n.ensureLoaded(); err != nil {
 		return ObjectIterator{}, err
+	}
+	if !n.exists {
+		return ObjectIterator{}, ErrNotExist
 	}
 	if n.typ != V_OBJECT {
 		return ObjectIterator{}, fmt.Errorf("node type %d is not an object", n.typ)
@@ -1066,11 +1157,14 @@ func (n *Node) InterfaceUseNumber() (interface{}, error) {
 // InterfaceUseNode is like Interface but container children are returned
 // as Node values ([]Node for arrays, map[string]Node for objects).
 func (n *Node) InterfaceUseNode() (interface{}, error) {
-	if n == nil || !n.exists {
+	if n == nil {
 		return nil, ErrNotExist
 	}
 	if err := n.ensureLoaded(); err != nil {
 		return nil, err
+	}
+	if !n.exists {
+		return nil, ErrNotExist
 	}
 	if n.typ == V_ANY {
 		return *n, nil
@@ -1079,11 +1173,14 @@ func (n *Node) InterfaceUseNode() (interface{}, error) {
 }
 
 func (n *Node) interfaceWith(useNumber, useNode bool) (interface{}, error) {
-	if n == nil || !n.exists {
+	if n == nil {
 		return nil, ErrNotExist
 	}
 	if err := n.ensureLoaded(); err != nil {
 		return nil, err
+	}
+	if !n.exists {
+		return nil, ErrNotExist
 	}
 	switch n.typ {
 	case V_ANY:
@@ -1168,11 +1265,14 @@ func (n *Node) ArrayUseNumber() ([]interface{}, error) {
 
 // ArrayUseNode returns the array as []Node.
 func (n *Node) ArrayUseNode() ([]Node, error) {
-	if n == nil || !n.exists {
+	if n == nil {
 		return nil, ErrNotExist
 	}
 	if err := n.ensureLoaded(); err != nil {
 		return nil, err
+	}
+	if !n.exists {
+		return nil, ErrNotExist
 	}
 	if n.typ == V_ANY {
 		if array, ok := n.any.([]Node); ok {
@@ -1215,11 +1315,14 @@ func (n *Node) MapUseNumber() (map[string]interface{}, error) {
 
 // MapUseNode returns the object as map[string]Node.
 func (n *Node) MapUseNode() (map[string]Node, error) {
-	if n == nil || !n.exists {
+	if n == nil {
 		return nil, ErrNotExist
 	}
 	if err := n.ensureLoaded(); err != nil {
 		return nil, err
+	}
+	if !n.exists {
+		return nil, ErrNotExist
 	}
 	if n.typ == V_ANY {
 		if object, ok := n.any.(map[string]Node); ok {
@@ -1252,7 +1355,8 @@ func (n *Node) Add(child Node) error {
 		return err
 	}
 	if n.typ == V_NONE || n.typ == V_NULL {
-		*n = NewArray([]Node{child})
+		replacement := NewArray([]Node{child})
+		assignLoaded(n, &replacement)
 		return nil
 	}
 	if !n.exists {
@@ -1267,11 +1371,7 @@ func (n *Node) Add(child Node) error {
 
 // AddAny is like Add but builds the node from an arbitrary Go value.
 func (n *Node) AddAny(v interface{}) error {
-	node, err := nodeFromInterface(v)
-	if err != nil {
-		return err
-	}
-	return n.Add(node)
+	return n.Add(NewAny(v))
 }
 
 // Set sets the value of an object entry by key. If the key does not exist
@@ -1290,7 +1390,8 @@ func (n *Node) Set(key string, node Node) (bool, error) {
 		return false, node.Check()
 	}
 	if n.typ == V_NONE || n.typ == V_NULL {
-		*n = NewObject([]Pair{NewPair(key, node)})
+		replacement := NewObject([]Pair{NewPair(key, node)})
+		assignLoaded(n, &replacement)
 		return false, nil
 	}
 	if !n.exists {
@@ -1311,11 +1412,7 @@ func (n *Node) Set(key string, node Node) (bool, error) {
 
 // SetAny is like Set but builds the node from an arbitrary Go value.
 func (n *Node) SetAny(key string, val interface{}) (bool, error) {
-	node, err := nodeFromInterface(val)
-	if err != nil {
-		return false, err
-	}
-	return n.Set(key, node)
+	return n.Set(key, NewAny(val))
 }
 
 // SetByIndex sets the i-th child of an array or object node (Sonic
@@ -1334,7 +1431,8 @@ func (n *Node) SetByIndex(idx int, node Node) (bool, error) {
 		return false, node.Check()
 	}
 	if idx == 0 && (n.typ == V_NONE || n.typ == V_NULL) {
-		*n = NewArray([]Node{node})
+		replacement := NewArray([]Node{node})
+		assignLoaded(n, &replacement)
 		return false, nil
 	}
 	if !n.exists {
@@ -1360,11 +1458,7 @@ func (n *Node) SetByIndex(idx int, node Node) (bool, error) {
 // SetAnyByIndex is like SetByIndex but builds the node from an arbitrary
 // Go value.
 func (n *Node) SetAnyByIndex(idx int, val interface{}) (bool, error) {
-	node, err := nodeFromInterface(val)
-	if err != nil {
-		return false, err
-	}
-	return n.SetByIndex(idx, node)
+	return n.SetByIndex(idx, NewAny(val))
 }
 
 // Unset removes the object entry with the given key. The returned bool
@@ -1401,13 +1495,13 @@ func (n *Node) UnsetByIndex(idx int) (bool, error) {
 	switch n.typ {
 	case V_ARRAY:
 		if idx < 0 || idx >= len(n.arr) {
-			return false, nil
+			return false, ErrNotExist
 		}
 		n.arr = append(n.arr[:idx], n.arr[idx+1:]...)
 		return true, nil
 	case V_OBJECT:
 		if idx < 0 || idx >= len(n.obj) {
-			return false, nil
+			return false, ErrNotExist
 		}
 		n.obj = append(n.obj[:idx], n.obj[idx+1:]...)
 		return true, nil
@@ -1427,13 +1521,13 @@ func (n *Node) Pop() error {
 	switch n.typ {
 	case V_ARRAY:
 		if len(n.arr) == 0 {
-			return fmt.Errorf("pop from empty array")
+			return nil
 		}
 		n.arr = n.arr[:len(n.arr)-1]
 		return nil
 	case V_OBJECT:
 		if len(n.obj) == 0 {
-			return fmt.Errorf("pop from empty object")
+			return nil
 		}
 		n.obj = n.obj[:len(n.obj)-1]
 		return nil
@@ -1473,7 +1567,9 @@ func (n *Node) Move(dst, src int) error {
 }
 
 // SortKeys sorts the keys of an object node. When recurse is true, SortKeys
-// also recursively sorts the keys of any nested object children.
+// also recursively sorts the keys of any nested object children. For an array
+// receiver, it always crosses nested arrays to reach object containers; recurse
+// controls traversal below those objects.
 func (n *Node) SortKeys(recurse bool) error {
 	if n == nil || !n.exists {
 		return ErrNotExist
@@ -1481,7 +1577,29 @@ func (n *Node) SortKeys(recurse bool) error {
 	if err := n.ensureLoaded(); err != nil {
 		return err
 	}
+	if n.typ == V_ARRAY {
+		return sortKeysArray(n, recurse)
+	}
 	return sortKeysNode(n, recurse)
+}
+
+// sortKeysArray crosses nested array containers regardless of recurse. Once
+// it reaches an object, recurse controls traversal below that object.
+func sortKeysArray(n *Node, recurse bool) error {
+	for i := range n.arr {
+		if err := sortKeysContainer(&n.arr[i], recurse); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func sortKeysContainer(n *Node, recurse bool) error {
+	switch n.typ {
+	case V_ARRAY, V_OBJECT:
+		return n.SortKeys(recurse)
+	}
+	return nil
 }
 
 func sortKeysNode(n *Node, recurse bool) error {
@@ -1493,18 +1611,14 @@ func sortKeysNode(n *Node, recurse bool) error {
 		sort.SliceStable(n.obj, func(i, j int) bool { return n.obj[i].Key < n.obj[j].Key })
 		if recurse {
 			for i := range n.obj {
-				if err := sortKeysNode(&n.obj[i].Value, recurse); err != nil {
+				if err := sortKeysContainer(&n.obj[i].Value, recurse); err != nil {
 					return err
 				}
 			}
 		}
 	case V_ARRAY:
 		if recurse {
-			for i := range n.arr {
-				if err := sortKeysNode(&n.arr[i], recurse); err != nil {
-					return err
-				}
-			}
+			return sortKeysArray(n, recurse)
 		}
 	}
 	return nil
@@ -1518,16 +1632,20 @@ func sortKeysNode(n *Node, recurse bool) error {
 // raw nodes it returns the raw text as given (compacted once on demand).
 // Error nodes propagate their underlying error (Sonic semantics).
 func (n *Node) Raw() (string, error) {
-	if n == nil || !n.exists {
+	if n == nil {
+		return "", ErrNotExist
+	}
+	n.lockRead()
+	defer n.unlockRead()
+	if !n.exists {
 		return "", ErrNotExist
 	}
 	if n.typ == V_ERROR {
-		if n.err != nil {
-			return "", n.err
+		if err := n.checkUnlocked(); err != nil {
+			return "", err
 		}
-		return "", n
 	}
-	if n.IsRaw() {
+	if n.isRawUnlocked() {
 		return n.raw, nil
 	}
 	if n.typ == V_ANY {
@@ -1536,7 +1654,7 @@ func (n *Node) Raw() (string, error) {
 	}
 	var b []byte
 	var err error
-	b, err = appendNodeJSON(b, n, false)
+	b, err = appendNodeJSONUnlocked(b, n, false)
 	if err != nil {
 		return "", err
 	}
@@ -1546,16 +1664,20 @@ func (n *Node) Raw() (string, error) {
 // MarshalJSON implements json.Marshaler. Error nodes propagate their
 // underlying error (Sonic semantics).
 func (n *Node) MarshalJSON() ([]byte, error) {
-	if n == nil || !n.exists {
-		return []byte("null"), nil
+	if n == nil {
+		return nil, ErrNotExist
+	}
+	n.lockRead()
+	defer n.unlockRead()
+	if !n.exists {
+		return nil, ErrNotExist
 	}
 	if n.typ == V_ERROR {
-		if n.err != nil {
-			return nil, n.err
+		if err := n.checkUnlocked(); err != nil {
+			return nil, err
 		}
-		return nil, n
 	}
-	if n.IsRaw() {
+	if n.isRawUnlocked() {
 		return []byte(n.raw), nil
 	}
 	if n.typ == V_ANY {
@@ -1563,7 +1685,7 @@ func (n *Node) MarshalJSON() ([]byte, error) {
 	}
 	var b []byte
 	var err error
-	b, err = appendNodeJSON(b, n, false)
+	b, err = appendNodeJSONUnlocked(b, n, false)
 	if err != nil {
 		return nil, err
 	}
@@ -1576,7 +1698,8 @@ func (n *Node) UnmarshalJSON(data []byte) error {
 	if n == nil {
 		return errors.New("UnmarshalJSON on nil Node")
 	}
-	*n = NewRaw(string(data))
+	replacement := NewRaw(string(data))
+	assignLoaded(n, &replacement)
 	return nil
 }
 
@@ -1682,10 +1805,19 @@ func nodeFromInterface(v interface{}) (Node, error) {
 // ---------------------------------------------------------------------------
 
 func appendNodeJSON(dst []byte, n *Node, escapeHTML bool) ([]byte, error) {
-	if n == nil || !n.exists {
+	if n == nil {
 		return append(dst, "null"...), nil
 	}
-	if n.IsRaw() {
+	n.lockRead()
+	defer n.unlockRead()
+	return appendNodeJSONUnlocked(dst, n, escapeHTML)
+}
+
+func appendNodeJSONUnlocked(dst []byte, n *Node, escapeHTML bool) ([]byte, error) {
+	if !n.exists {
+		return append(dst, "null"...), nil
+	}
+	if n.isRawUnlocked() {
 		return append(dst, n.raw...), nil
 	}
 	switch n.typ {
@@ -1855,10 +1987,35 @@ func (n *Node) ensureLoaded() error {
 	if n == nil {
 		return ErrNotExist
 	}
-	if n.IsRaw() {
+	if n.mu == nil {
+		if n.isRawUnlocked() {
+			return n.LoadAll()
+		}
+		return nil
+	}
+	n.mu.RLock()
+	isRaw := n.isRawUnlocked()
+	n.mu.RUnlock()
+	if isRaw {
 		return n.LoadAll()
 	}
 	return nil
+}
+
+func (n *Node) isRawUnlocked() bool {
+	return !n.loaded && n.raw != ""
+}
+
+func (n *Node) lockRead() {
+	if n.mu != nil {
+		n.mu.RLock()
+	}
+}
+
+func (n *Node) unlockRead() {
+	if n.mu != nil {
+		n.mu.RUnlock()
+	}
 }
 
 // itoa is a small strconv.Itoa alias kept here to avoid an extra import

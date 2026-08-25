@@ -20,14 +20,17 @@ import (
 const (
 	helperTimeout             = 30 * time.Second
 	helperWaitDelay           = time.Second
+	helperCleanupTimeout      = 5 * time.Second
+	helperCleanupRetryDelay   = 50 * time.Millisecond
 	maxDifferentialInputBytes = 64 << 10
 	maxHelperRequestBytes     = 1 << 20
 	maxHelperOutputBytes      = 1 << 20
 )
 
 const (
-	helperTempDirEnv   = "SONIC_DIFFTEST_HELPER_TEMP_DIR"
-	helperHangChildEnv = "SONIC_DIFFTEST_HELPER_HANG_CHILD"
+	helperTempDirEnv          = "SONIC_DIFFTEST_HELPER_TEMP_DIR"
+	helperHangChildEnv        = "SONIC_DIFFTEST_HELPER_HANG_CHILD"
+	helperCleanupHangChildEnv = "SONIC_DIFFTEST_HELPER_CLEANUP_HANG_CHILD"
 )
 
 var (
@@ -41,7 +44,7 @@ type helperExecutablePaths struct {
 }
 
 func TestMain(m *testing.M) {
-	if os.Getenv(helperHangChildEnv) == "1" {
+	if os.Getenv(helperHangChildEnv) == "1" || os.Getenv(helperCleanupHangChildEnv) != "" {
 		os.Exit(m.Run())
 	}
 
@@ -58,12 +61,16 @@ func TestMain(m *testing.M) {
 	helperExecutables = helperExecutablesFor(tempDir)
 	if err := buildHelperExecutables(helperExecutables); err != nil {
 		fmt.Fprintf(os.Stderr, "%v\n", err)
-		_ = os.RemoveAll(tempDir)
+		if cleanupErr := removeAllWithRetry(tempDir); cleanupErr != nil {
+			fmt.Fprintf(os.Stderr, "remove helper temp directory %q: %v\n", tempDir, cleanupErr)
+		}
 		os.Exit(1)
 	}
 	if err := os.Setenv(helperTempDirEnv, tempDir); err != nil {
 		fmt.Fprintf(os.Stderr, "set helper temp directory environment: %v\n", err)
-		_ = os.RemoveAll(tempDir)
+		if cleanupErr := removeAllWithRetry(tempDir); cleanupErr != nil {
+			fmt.Fprintf(os.Stderr, "remove helper temp directory %q: %v\n", tempDir, cleanupErr)
+		}
 		os.Exit(1)
 	}
 
@@ -72,7 +79,7 @@ func TestMain(m *testing.M) {
 		fmt.Fprintf(os.Stderr, "unset helper temp directory environment: %v\n", err)
 		exitCode = 1
 	}
-	if err := os.RemoveAll(tempDir); err != nil {
+	if err := removeAllWithRetry(tempDir); err != nil {
 		fmt.Fprintf(os.Stderr, "remove helper temp directory %q: %v\n", tempDir, err)
 		exitCode = 1
 	}
@@ -111,6 +118,23 @@ func buildHelperExecutables(paths helperExecutablePaths) error {
 		}
 	}
 	return nil
+}
+
+func removeAllWithRetry(path string) error {
+	deadline := time.Now().Add(helperCleanupTimeout)
+	for {
+		err := os.RemoveAll(path)
+		if err == nil {
+			return nil
+		}
+		retryDelay := helperCleanupRetryDelay
+		if remaining := time.Until(deadline); remaining <= 0 {
+			return err
+		} else if remaining < retryDelay {
+			retryDelay = remaining
+		}
+		time.Sleep(retryDelay)
+	}
 }
 
 type pathPart struct {
@@ -693,6 +717,92 @@ func TestHelperTimeoutKillsHangingDirectProcess(t *testing.T) {
 	}
 	if elapsed > 2*time.Second {
 		t.Fatalf("hanging direct process took %s, want bounded termination within 2s", elapsed)
+	}
+}
+
+func TestRemoveAllWithRetryWaitsForLockedExecutable(t *testing.T) {
+	if readyFile := os.Getenv(helperCleanupHangChildEnv); readyFile != "" {
+		if err := os.WriteFile(readyFile, nil, 0o600); err != nil {
+			t.Fatalf("signal cleanup child readiness: %v", err)
+		}
+		for {
+			runtime.Gosched()
+		}
+	}
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows keeps a running executable delete-locked")
+	}
+
+	tempDir := t.TempDir()
+	lockedExecutable := filepath.Join(tempDir, "cleanup-lock.exe")
+	testExecutable, err := os.Executable()
+	if err != nil {
+		t.Fatalf("find current test executable: %v", err)
+	}
+	contents, err := os.ReadFile(testExecutable)
+	if err != nil {
+		t.Fatalf("read current test executable: %v", err)
+	}
+	if err := os.WriteFile(lockedExecutable, contents, 0o755); err != nil {
+		t.Fatalf("copy current test executable: %v", err)
+	}
+
+	readyFile := filepath.Join(tempDir, "cleanup-child-ready")
+	child := exec.Command(lockedExecutable, "-test.run=^TestRemoveAllWithRetryWaitsForLockedExecutable$")
+	child.Env = append(os.Environ(), helperCleanupHangChildEnv+"="+readyFile)
+	if err := child.Start(); err != nil {
+		t.Fatalf("start cleanup child: %v", err)
+	}
+	childRunning := true
+	t.Cleanup(func() {
+		if childRunning {
+			_ = child.Process.Kill()
+			_ = child.Wait()
+		}
+		_ = os.RemoveAll(tempDir)
+	})
+
+	readyDeadline := time.Now().Add(2 * time.Second)
+	for {
+		if _, err := os.Stat(readyFile); err == nil {
+			break
+		} else if !os.IsNotExist(err) {
+			t.Fatalf("check cleanup child readiness: %v", err)
+		}
+		if time.Now().After(readyDeadline) {
+			t.Fatal("cleanup child did not become ready")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	cleanupDone := make(chan error, 1)
+	go func() {
+		cleanupDone <- removeAllWithRetry(tempDir)
+	}()
+	select {
+	case err := <-cleanupDone:
+		t.Fatalf("cleanup returned before the locked executable exited: %v", err)
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	if err := child.Process.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
+		t.Fatalf("terminate cleanup child: %v", err)
+	}
+	if err := child.Wait(); err == nil {
+		t.Fatal("cleanup child exited without termination")
+	}
+	childRunning = false
+
+	select {
+	case err := <-cleanupDone:
+		if err != nil {
+			t.Fatalf("cleanup after child exit: %v", err)
+		}
+	case <-time.After(helperCleanupTimeout + time.Second):
+		t.Fatalf("cleanup did not finish within %s after child exit", helperCleanupTimeout+time.Second)
+	}
+	if _, err := os.Stat(tempDir); !os.IsNotExist(err) {
+		t.Fatalf("helper temp directory still exists after cleanup: %v", err)
 	}
 }
 

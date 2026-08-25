@@ -2,8 +2,10 @@ package decoder
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -773,10 +775,66 @@ func TestSyntaxErrorMethods(t *testing.T) {
 	}
 }
 
+func TestSyntaxErrorDescriptionsMatchSonic(t *testing.T) {
+	nonempty := SyntaxError{Pos: 2, Src: "xx?yy", Msg: "bad"}
+	const want = "Syntax error at index 2: bad\n\n\txx?yy\n\t..^..\n"
+	if got := nonempty.Description(); got != want {
+		t.Fatalf("SyntaxError.Description() = %q, want %q", got, want)
+	}
+	if got, wantError := nonempty.Error(), strconv.Quote(want); got != wantError {
+		t.Fatalf("SyntaxError.Error() = %q, want %q", got, wantError)
+	}
+
+	empty := SyntaxError{Msg: "bad"}
+	wantEmpty := fmt.Sprintf("Syntax error no sources available, the input json is empty: %#v", empty)
+	if got := empty.Description(); got != wantEmpty {
+		t.Fatalf("empty SyntaxError.Description() = %q, want %q", got, wantEmpty)
+	}
+}
+
 func TestMismatchTypeErrorMethods(t *testing.T) {
 	mte := MismatchTypeError{Type: reflect.TypeOf(0)}
 	if mte.Description() == "" || mte.Error() == "" {
 		t.Fatalf("empty Description/Error")
+	}
+}
+
+func TestMismatchTypeErrorDescriptionMatchesSonic(t *testing.T) {
+	mismatch := MismatchTypeError{Pos: 5, Src: `{"n":1}`, Type: reflect.TypeOf("")}
+	const want = "Mismatch type string with value number at index 5: mismatch\n\n\t{\"n\":1}\n\t.....^.\n"
+	if got := mismatch.Description(); got != want {
+		t.Fatalf("MismatchTypeError.Description() = %q, want %q", got, want)
+	}
+	if got := mismatch.Error(); got != want {
+		t.Fatalf("MismatchTypeError.Error() = %q, want %q", got, want)
+	}
+
+	for _, tt := range []struct {
+		name  string
+		src   string
+		value string
+		want  string
+	}{
+		{name: "bool", src: "true", want: "bool"},
+		{name: "string", src: `"x"`, want: "string"},
+		{name: "object", src: "{}", want: "object"},
+		{name: "array", src: "[]", want: "array"},
+		{name: "number", src: "1", want: "number"},
+		{name: "value takes precedence", src: "true", value: "number", want: "number"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			err := MismatchTypeError{Src: tt.src, Value: tt.value, Type: reflect.TypeOf(0)}
+			want := fmt.Sprintf("Mismatch type int with value %s at index 0: mismatch\n\n\t%s\n\t^%s\n", tt.want, tt.src, strings.Repeat(".", len(tt.src)-1))
+			if got := err.Description(); got != want {
+				t.Fatalf("MismatchTypeError.Description() = %q, want %q", got, want)
+			}
+		})
+	}
+
+	nilType := MismatchTypeError{Src: "1"}
+	const wantNilType = "Mismatch type <nil> with value number at index 0: mismatch\n\n\t1\n\t^\n"
+	if got := nilType.Description(); got != wantNilType {
+		t.Fatalf("nil-type MismatchTypeError.Description() = %q, want %q", got, wantNilType)
 	}
 }
 

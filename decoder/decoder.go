@@ -30,8 +30,10 @@ import (
 	"fmt"
 	"io"
 	"reflect"
+	"strconv"
 	"strings"
 
+	"github.com/bytedance/sonic/internal/errorcontext"
 	"github.com/bytedance/sonic/internal/jsonconv"
 	nativetypes "github.com/bytedance/sonic/internal/native/types"
 	"github.com/bytedance/sonic/option"
@@ -90,10 +92,13 @@ type SyntaxError struct {
 	Offset int64
 }
 
-func (e SyntaxError) Error() string { return fmt.Sprintf("%q", e.Description()) }
+func (e SyntaxError) Error() string { return strconv.Quote(e.Description()) }
 
 func (e SyntaxError) Description() string {
-	return "Syntax error " + e.Message()
+	if e.Src == "" {
+		return fmt.Sprintf("Syntax error no sources available, the input json is empty: %#v", e)
+	}
+	return "Syntax error " + errorcontext.SourceDescription(e.Src, e.Pos, e.Message())
 }
 
 func (e SyntaxError) Message() string {
@@ -118,7 +123,32 @@ type MismatchTypeError struct {
 func (e MismatchTypeError) Error() string { return e.Description() }
 
 func (e MismatchTypeError) Description() string {
-	return fmt.Sprintf("Mismatch type %v", e.Type)
+	typeName := "<nil>"
+	if e.Type != nil {
+		typeName = e.Type.String()
+	}
+	return "Mismatch type " + typeName + " with value " + e.valueKind() + " " + errorcontext.SourceDescription(e.Src, e.Pos, nativetypes.ERR_MISMATCH.Message())
+}
+
+func (e MismatchTypeError) valueKind() string {
+	if e.Value != "" {
+		return e.Value
+	}
+	if e.Pos < 0 || e.Pos >= len(e.Src) {
+		return "number"
+	}
+	switch e.Src[e.Pos] {
+	case 't', 'f':
+		return "bool"
+	case '"':
+		return "string"
+	case '{':
+		return "object"
+	case '[':
+		return "array"
+	default:
+		return "number"
+	}
 }
 
 // Pretouch precompiles the given type. In this phase there is no JIT

@@ -12,8 +12,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"strings"
+	"sync"
 
+	"github.com/bytedance/sonic/internal/errorcontext"
 	nativetypes "github.com/bytedance/sonic/internal/native/types"
 )
 
@@ -58,14 +59,18 @@ type Node struct {
 	// scalar/container fields populated. A NewRaw node has loaded=false
 	// until Load / LoadAll is called.
 	loaded bool
-	raw    string
-	str    string
-	num    json.Number
-	arr    []Node
-	obj    []Pair
 	boolv  bool
-	any    interface{}
-	err    error
+	// mu is allocated only for valid lazy nodes constructed with concurrent
+	// reads enabled. It is immutable after construction and protects the
+	// one-time raw-to-loaded materialization.
+	mu  *sync.RWMutex
+	raw string
+	str string
+	num json.Number
+	arr []Node
+	obj []Pair
+	any interface{}
+	err error
 }
 
 // Pair is an object key/value pair. Object nodes store their entries as
@@ -146,45 +151,7 @@ func (e SyntaxError) description() string {
 	if e.Src == "" {
 		return fmt.Sprintf("no sources available, the input json is empty: %#v", e)
 	}
-	p, x, q, y := syntaxErrorBounds(len(e.Src), e.Pos)
-	return fmt.Sprintf(
-		"at index %d: %s\n\n\t%s\n\t%s^%s\n",
-		e.Pos,
-		e.Message(),
-		e.Src[p:q],
-		strings.Repeat(".", x),
-		strings.Repeat(".", y),
-	)
-}
-
-func syntaxErrorBounds(size int, pos int) (lbound int, lwidth int, rbound int, rwidth int) {
-	if pos >= size || pos < 0 {
-		return 0, 0, size, 0
-	}
-	i := 16
-	lbound = pos - i
-	rbound = pos + i
-	if lbound < 0 {
-		lbound, rbound, i = 0, rbound-lbound, i+lbound
-	}
-	if n := size; rbound > n {
-		n = rbound - n
-		rbound = size
-		if lbound > n {
-			i += n
-			lbound -= n
-		}
-	}
-	lwidth = clampZero(i)
-	rwidth = clampZero(rbound - lbound - i - 1)
-	return
-}
-
-func clampZero(v int) int {
-	if v < 0 {
-		return 0
-	}
-	return v
+	return errorcontext.SourceDescription(e.Src, e.Pos, e.Message())
 }
 
 // VisitorOptions tunes Preorder traversal behavior.

@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync"
 
 	nativetypes "github.com/bytedance/sonic/internal/native/types"
-	vfastjson "github.com/valyala/fastjson"
 )
 
 // NewSearcher builds a Searcher for the given JSON source. ValidateJSON
@@ -17,13 +17,11 @@ func NewSearcher(str string) *Searcher {
 }
 
 // GetByPath parses the JSON source enough to resolve path and returns
-// the matched node. When CopyReturn is false the returned Node may
-// reference the searcher's internal buffers; when true a deep copy is
-// returned. For this implementation a deep copy is always returned
-// because parseRawToNode fully copies the fastjson value into Node
-// storage that owns its own memory.
+// the matched node. When CopyReturn is false the returned Node may reference
+// the selected substring in the searcher's source; when true it owns an exact
+// copy of that substring.
 func (s *Searcher) GetByPath(path ...interface{}) (Node, error) {
-	return s.getByPath(path, s.CopyReturn)
+	return s.getByPath(path, s.SearchOptions)
 }
 
 // GetByPathCopy is GetByPath with CopyReturn semantics. The returned
@@ -31,24 +29,20 @@ func (s *Searcher) GetByPath(path ...interface{}) (Node, error) {
 // Like Sonic, this persists CopyReturn=true on the searcher.
 func (s *Searcher) GetByPathCopy(path ...interface{}) (Node, error) {
 	s.CopyReturn = true
-	return s.getByPath(path, true)
+	return s.getByPath(path, s.SearchOptions)
 }
 
-func (s *Searcher) getByPath(path []interface{}, copyReturn bool) (Node, error) {
+func (s *Searcher) getByPath(path []interface{}, opts SearchOptions) (Node, error) {
 	if s == nil {
 		return Node{}, ErrNotExist
 	}
-	if len(path) == 0 {
-		_, code := firstValueRaw(s.src)
-		if code != 0 {
-			return Node{}, code
-		}
-		return NewRaw(s.src), nil
-	}
-	if node, status := getPathRaw(s.src, path); status != rawPathNoFast {
+	if raw, status := getPathRaw(s.src, path, opts.ValidateJSON); status != rawPathNoFast {
 		switch status {
 		case rawPathFound:
-			return node, nil
+			if opts.CopyReturn {
+				raw = strings.Clone(raw)
+			}
+			return newUncheckedRaw(raw, opts), nil
 		case rawPathMissing:
 			return Node{}, ErrNotExist
 		case rawPathInvalid:
@@ -112,30 +106,6 @@ func (s *Searcher) getByPath(path []interface{}, copyReturn bool) (Node, error) 
 	return *cur, nil
 }
 
-func firstValueRaw(src string) (string, nativetypes.ParsingError) {
-	start := 0
-	for start < len(src) && isJSONSpace(src[start]) {
-		start++
-	}
-	if start == len(src) {
-		return "", nativetypes.ERR_EOF
-	}
-	end, ok := scanFirstValueEnd(src, start)
-	if !ok {
-		return "", nativetypes.ERR_MISMATCH
-	}
-	raw := src[start:end]
-	if !validScannedRootRaw(src, start, end) {
-		var fp vfastjson.Parser
-		_, err := fp.Parse(raw)
-		if err == nil {
-			return "", nativetypes.ERR_INVALID_NUMBER_FMT
-		}
-		return "", mapFastjsonError(raw, err)
-	}
-	return raw, 0
-}
-
 type rawPathStatus int
 
 const (
@@ -145,13 +115,13 @@ const (
 	rawPathInvalid
 )
 
-func getPathRaw(src string, path []interface{}) (Node, rawPathStatus) {
+func getPathRaw(src string, path []interface{}, validate bool) (string, rawPathStatus) {
 	if !canScanASCII(src) {
-		return Node{}, rawPathNoFast
+		return "", rawPathNoFast
 	}
 	start := skipJSONSpaceString(src, 0)
 	if start == len(src) {
-		return Node{}, rawPathInvalid
+		return "", rawPathInvalid
 	}
 	for _, step := range path {
 		switch x := step.(type) {
@@ -159,69 +129,103 @@ func getPathRaw(src string, path []interface{}) (Node, rawPathStatus) {
 			var status rawPathStatus
 			start, status = findObjectValueStartString(src, start, x)
 			if status != rawPathFound {
-				return Node{}, status
+				return "", status
 			}
 		case int:
 			var status rawPathStatus
 			start, status = findArrayValueStartString(src, start, x)
 			if status != rawPathFound {
-				return Node{}, status
+				return "", status
 			}
 		case int64:
 			idx, ok := intFromInt64(x)
 			if !ok {
-				return Node{}, rawPathMissing
+				return "", rawPathMissing
 			}
 			var status rawPathStatus
 			start, status = findArrayValueStartString(src, start, idx)
 			if status != rawPathFound {
-				return Node{}, status
+				return "", status
 			}
 		case json.Number:
 			if idx, err := strconv.Atoi(string(x)); err == nil {
 				var status rawPathStatus
 				start, status = findArrayValueStartString(src, start, idx)
 				if status != rawPathFound {
-					return Node{}, status
+					return "", status
 				}
 			} else {
 				var status rawPathStatus
 				start, status = findObjectValueStartString(src, start, string(x))
 				if status != rawPathFound {
-					return Node{}, status
+					return "", status
 				}
 			}
 		default:
-			return Node{}, rawPathNoFast
+			return "", rawPathNoFast
 		}
 	}
-	end, ok := scanValueEndString(src, start, 0)
-	if !ok {
-		return Node{}, rawPathInvalid
-	}
-	node := nodeFromRaw(src[start:end])
-	if err := node.Check(); err != nil {
-		return Node{}, rawPathInvalid
-	}
-	return node, rawPathFound
+	return searchValueRaw(src, start, validate)
 }
 
-func nodeFromRaw(raw string) Node {
-	if raw == "" {
-		return Node{}
+func searchValueRaw(src string, start int, validate bool) (string, rawPathStatus) {
+	if start >= len(src) {
+		return "", rawPathInvalid
 	}
+	var (
+		end int
+		ok  bool
+	)
+	if src[start] == '{' || src[start] == '[' {
+		end, ok = scanContainerEnd(src, start)
+	} else {
+		end, ok = scanValueEndString(src, start, 0)
+	}
+	if !ok {
+		return "", rawPathInvalid
+	}
+	raw := src[start:end]
+	// Structurally closed string tokens preserve Sonic's raw compatibility,
+	// including unknown escapes. Validation still checks other non-string syntax.
+	if validate && raw[0] != '"' {
+		bareExponent := isBareExponent(raw) && validScannedRootRaw(src, start, end)
+		if !validRootRaw(raw) && !bareExponent {
+			return "", rawPathInvalid
+		}
+		if _, code := parseRawToNodeLocal(raw); code != 0 && code != nativetypes.ERR_INVALID_ESCAPE && !bareExponent {
+			return "", rawPathInvalid
+		}
+	}
+	if !validate && (raw[0] == '{' || raw[0] == '[') {
+		// Preserve loose containers without accepting malformed number tokens.
+		if _, code := parseRawToNodeLocal(raw); code == nativetypes.ERR_INVALID_NUMBER_FMT {
+			return "", rawPathInvalid
+		}
+	}
+	return raw, rawPathFound
+}
+
+func newUncheckedRaw(raw string, opts SearchOptions) Node {
+	typ := V_NUMBER
 	switch raw[0] {
 	case 'n':
-		return NewNull()
+		typ = V_NULL
 	case 't':
-		return NewBool(true)
+		typ = V_TRUE
 	case 'f':
-		return NewBool(false)
-	case '{', '[', '"':
-		return NewRaw(raw)
-	default:
-		return NewNumber(raw)
+		typ = V_FALSE
+	case '{':
+		typ = V_OBJECT
+	case '[':
+		typ = V_ARRAY
+	case '"':
+		typ = V_STRING
 	}
+	node := Node{typ: typ, exists: true, raw: raw}
+	if opts.ConcurrentRead {
+		node.mu = &sync.RWMutex{}
+	}
+	return node
 }
 
 func canScanASCII(src string) bool {

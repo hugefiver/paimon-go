@@ -141,6 +141,26 @@ func TestNoCopyRawMessageNilMarshalEncodesNull(t *testing.T) {
 	}
 }
 
+func TestNoCopyRawMessageNilUnmarshalError(t *testing.T) {
+	var raw *NoCopyRawMessage
+
+	err := raw.UnmarshalJSON([]byte(`null`))
+	if err == nil {
+		t.Fatal("nil NoCopyRawMessage.UnmarshalJSON() error = nil")
+	}
+	if got, want := err.Error(), "sonic.NoCopyRawMessage: UnmarshalJSON on nil pointer"; got != want {
+		t.Fatalf("nil NoCopyRawMessage.UnmarshalJSON() error = %q, want %q", got, want)
+	}
+}
+
+func TestASTSyntaxErrorUsesSourceDescription(t *testing.T) {
+	err := ast.SyntaxError{Pos: 2, Src: "xx?yy", Msg: "bad"}
+	const want = "Syntax error at index 2: bad\n\n\txx?yy\n\t..^..\n"
+	if got := err.Description(); got != want {
+		t.Fatalf("ast.SyntaxError.Description() = %q, want %q", got, want)
+	}
+}
+
 func TestRootGetEscapedObjectKey(t *testing.T) {
 	for _, tt := range []struct {
 		json string

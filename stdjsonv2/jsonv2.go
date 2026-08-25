@@ -162,50 +162,56 @@ func buildUnmarshalOptions(cfg Config) []jsonv2.Options {
 	return opts
 }
 
-// decodeBytes decodes data into val. When cfg.UseNumber is set we use the
-// standard encoding/json.Decoder so that callers see json.Number values
-// (jsonv2 v2 semantics decode numbers as float64 by default and do not
-// expose a UseNumber knob on the v2 API). Otherwise we use jsonv2.Unmarshal
-// to honor the v2-specific options (RejectUnknownMembers, etc.).
-func decodeBytes(data []byte, val interface{}, cfg Config, opts []jsonv2.Options) error {
-	if cfg.UseNumber || cfg.UseInt64 {
-		dec := json.NewDecoder(bytes.NewReader(data))
-		dec.UseNumber()
-		if cfg.DisallowUnknownFields {
-			dec.DisallowUnknownFields()
-		}
-		if err := dec.Decode(val); err != nil {
-			return err
-		}
-		if err := rejectTrailingStdJSONData(dec); err != nil {
-			return err
-		}
-		if cfg.UseInt64 && !cfg.UseNumber {
-			jsonconv.ConvertNumbersToInt64(val)
-		}
-		return nil
+// numberModeUnmarshalers handles only JSON number tokens. It uses the v1
+// decoder locally to retain json.Number values, while jsonv2 recursively
+// handles all other values so its option and merge semantics continue to apply.
+var numberModeUnmarshalers = jsonv2.UnmarshalFromFunc(func(dec *stdjsontext.Decoder, out *any) error {
+	if dec.PeekKind() != stdjsontext.Kind('0') {
+		return errors.ErrUnsupported
 	}
+	if *out != nil {
+		if _, ok := (*out).(json.Number); !ok {
+			return errors.ErrUnsupported
+		}
+		// A scalar number is replaced, rather than merged, when decoding a
+		// duplicate object member.
+		*out = nil
+	}
+
+	raw, err := dec.ReadValue()
+	if err != nil {
+		return err
+	}
+	var value any
+	std := json.NewDecoder(bytes.NewReader(raw))
+	std.UseNumber()
+	if err := std.Decode(&value); err != nil {
+		return err
+	}
+	*out = value
+	return nil
+})
+
+// decodeBytes decodes data into val through jsonv2. Number modes register a
+// targeted interface unmarshaler so typed and prepopulated values continue to
+// use jsonv2's native option and merge handling.
+func decodeBytes(data []byte, val interface{}, cfg Config, opts []jsonv2.Options) error {
 	// AllowDuplicateNames/AllowInvalidUTF8 keep RFC 8259 syntax
 	// acceptance (both are valid standard JSON and accepted by the root
 	// backend and by encoding/json v1).
-	allOpts := make([]jsonv2.Options, 0, len(opts)+2)
+	allOpts := make([]jsonv2.Options, 0, len(opts)+3)
 	allOpts = append(allOpts, opts...)
 	allOpts = append(allOpts, stdjsontext.AllowDuplicateNames(true), stdjsontext.AllowInvalidUTF8(true))
-	return jsonv2.Unmarshal(data, val, allOpts...)
-}
-
-var errTrailingStdJSONData = errors.New("invalid trailing data after top-level value")
-
-func rejectTrailingStdJSONData(dec *json.Decoder) error {
-	var extra struct{}
-	err := dec.Decode(&extra)
-	if err == io.EOF {
-		return nil
+	if cfg.UseNumber || cfg.UseInt64 {
+		allOpts = append(allOpts, jsonv2.WithUnmarshalers(numberModeUnmarshalers))
 	}
-	if err == nil {
-		return errTrailingStdJSONData
+	if err := jsonv2.Unmarshal(data, val, allOpts...); err != nil {
+		return err
 	}
-	return err
+	if cfg.UseInt64 && !cfg.UseNumber {
+		jsonconv.ConvertNumbersToInt64(val)
+	}
+	return nil
 }
 
 // jsonv2Encoder implements Encoder by buffering each value and writing

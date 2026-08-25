@@ -794,6 +794,104 @@ func TestCompileCompatibilityTypes(t *testing.T) {
 	var _ io.Writer = &bytes.Buffer{}
 }
 
+func TestPerformanceReviewDocumentationFactLock(t *testing.T) {
+	contents, err := os.ReadFile("README.md")
+	if err != nil {
+		t.Fatalf("read README.md: %v", err)
+	}
+	text := string(contents)
+	for _, want := range []string{
+		"`module github.com/bytedance/sonic`",
+		"Sonic `v1.15.2`",
+		"Go 1.27",
+		"replace github.com/bytedance/sonic => ../paimon-go",
+		"import \"github.com/bytedance/sonic\"",
+		"sonic_stdjson",
+		"sonic_jsonv2",
+		"互斥",
+		"`APIKind` 始终等于 `UseSonicJSON`",
+		"原生/JIT",
+		"GOPROXY=off",
+		"fuzz corpus 总数为 7",
+		"](docs/compatibility.md)",
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("README.md does not contain required text %q", want)
+		}
+	}
+}
+
+func TestConcurrentReadDocumentationFactLock(t *testing.T) {
+	contents, err := os.ReadFile("docs/compatibility.md")
+	if err != nil {
+		t.Fatalf("read docs/compatibility.md: %v", err)
+	}
+	text := string(contents)
+	for _, want := range []string{
+		"`ConcurrentRead` protects only the pointer-receiver read APIs",
+		"`Type`, `IsRaw`, and `Error` are value-receiver APIs that are not concurrent safe",
+		"does not make `Load`, `LoadAll`, `UnmarshalJSON`, or any mutation safe",
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("docs/compatibility.md does not contain ConcurrentRead contract %q", want)
+		}
+	}
+}
+
+var performanceReviewREADMEH2Headings = []string{
+	"## 项目定位与兼容边界",
+	"## 克隆、原始 import 与本地 replace",
+	"## 快速开始",
+	"## Root build tags",
+	"## 兼容限制",
+	"## 基准",
+	"## 测试与 fuzz",
+}
+
+func performanceReviewREADMEHeadings(text string) []string {
+	var headings []string
+	text = strings.ReplaceAll(text, "\r\n", "\n")
+	for _, line := range strings.Split(text, "\n") {
+		if strings.HasPrefix(line, "## ") {
+			headings = append(headings, line)
+		}
+	}
+	return headings
+}
+
+func TestPerformanceReviewREADMEFinalStructure(t *testing.T) {
+	contents, err := os.ReadFile("README.md")
+	if err != nil {
+		t.Fatalf("read README.md: %v", err)
+	}
+	text := string(contents)
+	if headings := performanceReviewREADMEHeadings(text); !reflect.DeepEqual(headings, performanceReviewREADMEH2Headings) {
+		t.Errorf("README.md H2 headings = %q, want %q", headings, performanceReviewREADMEH2Headings)
+	}
+	for _, stale := range []string{
+		"## 项目特性",
+		"相对同机 upstream",
+		"历史发布前验证",
+		"恢复调用者",
+		"调试",
+	} {
+		if strings.Contains(text, stale) {
+			t.Errorf("README.md contains stale text %q", stale)
+		}
+	}
+}
+
+func TestPerformanceReviewREADMEFinalStructureCRLF(t *testing.T) {
+	contents, err := os.ReadFile("README.md")
+	if err != nil {
+		t.Fatalf("read README.md: %v", err)
+	}
+	crlfText := strings.ReplaceAll(strings.ReplaceAll(string(contents), "\r\n", "\n"), "\n", "\r\n")
+	if headings := performanceReviewREADMEHeadings(crlfText); !reflect.DeepEqual(headings, performanceReviewREADMEH2Headings) {
+		t.Errorf("CRLF README H2 headings = %q, want %q", headings, performanceReviewREADMEH2Headings)
+	}
+}
+
 func TestFinalReviewDocumentationClaims(t *testing.T) {
 	for _, tt := range []struct {
 		path     string
@@ -825,14 +923,6 @@ func TestFinalReviewDocumentationClaims(t *testing.T) {
 			contains: []string{
 				"Package-level encode, decode, and validation helpers use the separately assignable `fastjson.ConfigDefault`; `Get*` and `Pretouch*` forward to the root package.",
 				"This local `Valid`/`Unmarshal` acceptance is an intentional divergence from the Go 1.27 upstream Sonic fallback, while both implementations' raw AST entry points agree on the raw value.",
-			},
-		},
-		{
-			path: "README.md",
-			contains: []string{
-				"当前 checkout 中提交的 fuzz corpus 总数为 7：root Valid 1 个、AST roundtrip 1 个、differential 5 个。",
-				"源码内置 10 个 `f.Add` seed",
-				"不能当作当前 checkout 中提交的 corpus 数量",
 			},
 		},
 		{

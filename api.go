@@ -105,7 +105,7 @@ func (m *NoCopyRawMessage) UnmarshalJSON(data []byte) error {
 
 // errNoCopyRawMessageNil is returned when UnmarshalJSON is called on a
 // nil NoCopyRawMessage pointer.
-var errNoCopyRawMessageNil = newError("sonic: UnmarshalJSON on nil pointer of NoCopyRawMessage")
+var errNoCopyRawMessageNil = newError("sonic.NoCopyRawMessage: UnmarshalJSON on nil pointer")
 
 // newError is a tiny helper to avoid importing fmt in the hot path.
 func newError(msg string) error { return &stringError{msg: msg} }

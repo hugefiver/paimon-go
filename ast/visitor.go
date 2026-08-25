@@ -77,7 +77,7 @@ func (p *preorderParser) parseObject(visitor Visitor) error {
 	// Estimate capacity from the source between '{' and matching '}'.
 	capacity := p.guessContainerSize()
 	if err := visitor.OnObjectBegin(capacity); err != nil {
-		if errors.Is(err, VisitOPSkip) {
+		if err == VisitOPSkip {
 			// Skip the object body but still emit the end event.
 			if err := p.skipContainer('{'); err != nil {
 				return err
@@ -103,30 +103,16 @@ func (p *preorderParser) parseObject(visitor Visitor) error {
 			return err
 		}
 		if err := visitor.OnObjectKey(key); err != nil {
-			if errors.Is(err, VisitOPSkip) {
-				// Skip just this value.
-				p.skipWhitespace()
-				if p.pos >= len(p.src) || p.src[p.pos] != ':' {
-					return &SyntaxError{Pos: p.pos, Src: p.src, Code: nativetypes.ERR_INVALID_CHAR, Msg: "expected ':' after object key"}
-				}
-				p.pos++
-				p.skipWhitespace()
-				if err := p.skipValue(); err != nil {
-					return err
-				}
-			} else {
-				return err
-			}
-		} else {
-			p.skipWhitespace()
-			if p.pos >= len(p.src) || p.src[p.pos] != ':' {
-				return &SyntaxError{Pos: p.pos, Src: p.src, Code: nativetypes.ERR_INVALID_CHAR, Msg: "expected ':' after object key"}
-			}
-			p.pos++
-			p.skipWhitespace()
-			if err := p.parseValue(visitor); err != nil {
-				return err
-			}
+			return err
+		}
+		p.skipWhitespace()
+		if p.pos >= len(p.src) || p.src[p.pos] != ':' {
+			return &SyntaxError{Pos: p.pos, Src: p.src, Code: nativetypes.ERR_INVALID_CHAR, Msg: "expected ':' after object key"}
+		}
+		p.pos++
+		p.skipWhitespace()
+		if err := p.parseValue(visitor); err != nil {
+			return err
 		}
 		p.skipWhitespace()
 		if p.pos >= len(p.src) {
@@ -151,7 +137,7 @@ func (p *preorderParser) parseArray(visitor Visitor) error {
 	p.skipWhitespace()
 	capacity := p.guessContainerSize()
 	if err := visitor.OnArrayBegin(capacity); err != nil {
-		if errors.Is(err, VisitOPSkip) {
+		if err == VisitOPSkip {
 			if err := p.skipContainer('['); err != nil {
 				return err
 			}

@@ -102,6 +102,108 @@ func TestGetSkipsOnlyBalancedPreTargetContainers(t *testing.T) {
 	}
 }
 
+func TestGetRoutesExplicitSearcherOptionsWithoutChangingDefault(t *testing.T) {
+	if compatmode.StdJSON {
+		t.Skip("explicit Searcher routing is Sonic compatibility behavior")
+	}
+
+	const malformedSelected = `{"selected":{garbage}}`
+	if _, err := Get([]byte(malformedSelected), ast.SearchOptions{}, "selected"); err == nil {
+		t.Fatal("default all-false Get accepted malformed selected container")
+	}
+
+	for _, opts := range []ast.SearchOptions{
+		{CopyReturn: true},
+		{ConcurrentRead: true},
+	} {
+		node, err := Get([]byte(malformedSelected), opts, "selected")
+		if err != nil {
+			t.Fatalf("Get(%+v) error = %v", opts, err)
+		}
+		raw, err := node.Raw()
+		if err != nil || raw != `{garbage}` {
+			t.Fatalf("Get(%+v) Raw() = %q, %v; want {garbage}, nil", opts, raw, err)
+		}
+	}
+
+	root, err := Get([]byte(`{garbage} trailing`), ast.SearchOptions{CopyReturn: true})
+	if err != nil {
+		t.Fatalf("root CopyReturn Get error = %v", err)
+	}
+	if raw, err := root.Raw(); err != nil || raw != `{garbage}` {
+		t.Fatalf("root CopyReturn Get Raw() = %q, %v; want {garbage}, nil", raw, err)
+	}
+
+	for _, input := range []string{
+		`{"before":{garbage},"selected":1}`,
+		`{"selected":1,"after":{garbage}}`,
+	} {
+		node, err := Get([]byte(input), ast.SearchOptions{ValidateJSON: true}, "selected")
+		if err != nil {
+			t.Fatalf("ValidateJSON Get(%q) error = %v", input, err)
+		}
+		raw, err := node.Raw()
+		if err != nil || raw != "1" {
+			t.Fatalf("ValidateJSON Get(%q) Raw() = %q, %v; want 1, nil", input, raw, err)
+		}
+	}
+}
+
+func TestSearcherRoutingPredicates(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		opts       ast.SearchOptions
+		searcher   bool
+		strictPath bool
+	}{
+		{name: "default"},
+		{name: "validate", opts: ast.SearchOptions{ValidateJSON: true}, searcher: true},
+		{name: "copy", opts: ast.SearchOptions{CopyReturn: true}, searcher: true, strictPath: true},
+		{name: "concurrent", opts: ast.SearchOptions{ConcurrentRead: true}, searcher: true, strictPath: true},
+		{name: "all", opts: ast.SearchOptions{ValidateJSON: true, CopyReturn: true, ConcurrentRead: true}, searcher: true, strictPath: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := shouldUseSearcher(tt.opts); got != tt.searcher {
+				t.Fatalf("shouldUseSearcher(%+v) = %t, want %t", tt.opts, got, tt.searcher)
+			}
+			if got := shouldUseStrictSearcher(tt.opts); got != tt.strictPath {
+				t.Fatalf("shouldUseStrictSearcher(%+v) = %t, want %t", tt.opts, got, tt.strictPath)
+			}
+		})
+	}
+}
+
+func TestDefaultRootGetPreservesSearcherValidation(t *testing.T) {
+	if compatmode.StdJSON {
+		t.Skip("default root Searcher behavior is Sonic compatibility behavior")
+	}
+
+	for _, input := range []string{`{garbage}`, `{"a":{garbage}}`} {
+		if _, err := Get([]byte(input), ast.SearchOptions{}); err == nil {
+			t.Fatalf("default root Get(%q) error = nil, want malformed JSON error", input)
+		}
+	}
+
+	for _, input := range []string{`"\q"`, `{"a":"\q","b":1}`} {
+		node, err := Get([]byte(input), ast.SearchOptions{})
+		if err != nil {
+			t.Fatalf("default root Get(%q) error = %v", input, err)
+		}
+		raw, err := node.Raw()
+		if err != nil || raw != input {
+			t.Fatalf("default root Get(%q).Raw() = %q, %v; want original raw", input, raw, err)
+		}
+	}
+
+	node, err := Get([]byte(`{"before":{garbage},"selected":1}`), ast.SearchOptions{}, "selected")
+	if err != nil {
+		t.Fatalf("default nonempty Get error = %v", err)
+	}
+	if raw, err := node.Raw(); err != nil || raw != "1" {
+		t.Fatalf("default nonempty Get Raw() = %q, %v; want 1, nil", raw, err)
+	}
+}
+
 func TestScanContainerEndSkipsContentsWithinDepthLimit(t *testing.T) {
 	data := []byte(`{"string":"}","escaped":"\\\"}","nested":[garbage]}`)
 	if end, ok := scanContainerEnd(data, 0); !ok || end != len(data) {

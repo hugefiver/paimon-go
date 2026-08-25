@@ -96,11 +96,10 @@ func escapeRawStringControls(data []byte) []byte {
 
 // Get resolves path against data and returns the matching AST node.
 //
-// When opts.ValidateJSON is true the full document is validated before
-// lookup and any structural error is returned. When opts.CopyReturn is
-// true a deep-copied Node is returned (always the case here: the ast
-// search layer already produces owning nodes). An empty path returns the
-// whole document parsed into a Node.
+// Explicit SearchOptions use Searcher semantics: ValidateJSON checks only the
+// selected value, while CopyReturn copies that selected raw value. With no
+// options, non-empty paths retain the existing getPathASCII fast path. An
+// empty path preserves NewSearcher's default validation for the first value.
 //
 // An invalid path element type or a missing node yields ast.ErrNotExist
 // or ast.ErrUnsupportType wrapped with context.
@@ -111,10 +110,8 @@ func Get(data []byte, opts ast.SearchOptions, path ...interface{}) (ast.Node, er
 	if compatmode.StdJSON {
 		return getStdJSON(data, opts, path...)
 	}
-	if opts.ValidateJSON {
-		if _, code := ast.NewParser(string(data)).Parse(); code != 0 {
-			return ast.Node{}, code
-		}
+	if shouldUseSearcher(opts) {
+		return getWithSearcher(data, opts, path...)
 	}
 	if len(path) > 0 {
 		node, status := getPathASCII(data, path)
@@ -127,18 +124,21 @@ func Get(data []byte, opts ast.SearchOptions, path ...interface{}) (ast.Node, er
 			return ast.Node{}, scanSyntaxError(data)
 		}
 	}
-	src := string(data)
-	// ast.NewSearcher.GetByPath honors SearchOptions.ValidateJSON, but we
-	// have already validated above. We pass the options through so the
-	// searcher sees the caller's intent and so callers that set
-	// ValidateJSON here without pre-validating still get errors.
-	s := ast.NewSearcher(src)
+	return ast.NewSearcher(string(data)).GetByPath()
+}
+
+func shouldUseSearcher(opts ast.SearchOptions) bool {
+	return opts.ValidateJSON || opts.CopyReturn || opts.ConcurrentRead
+}
+
+func shouldUseStrictSearcher(opts ast.SearchOptions) bool {
+	return opts.CopyReturn || opts.ConcurrentRead
+}
+
+func getWithSearcher(data []byte, opts ast.SearchOptions, path ...interface{}) (ast.Node, error) {
+	s := ast.NewSearcher(string(data))
 	s.SearchOptions = opts
-	node, err := s.GetByPath(path...)
-	if err != nil {
-		return ast.Node{}, err
-	}
-	return node, nil
+	return s.GetByPath(path...)
 }
 
 func getStdJSON(data []byte, opts ast.SearchOptions, path ...interface{}) (ast.Node, error) {
@@ -152,6 +152,10 @@ func getStdJSON(data []byte, opts ast.SearchOptions, path ...interface{}) (ast.N
 			return ast.Node{}, &ast.SyntaxError{Msg: err.Error(), Code: nativetypes.ERR_INVALID_CHAR}
 		}
 	}
+	if shouldUseStrictSearcher(opts) {
+		opts.ValidateJSON = false
+		return getWithSearcher(data, opts, path...)
+	}
 	if len(path) > 0 {
 		node, status := getPathASCII(data, path)
 		switch status {
@@ -163,10 +167,8 @@ func getStdJSON(data []byte, opts ast.SearchOptions, path ...interface{}) (ast.N
 			return ast.Node{}, scanSyntaxError(data)
 		}
 	}
-	s := ast.NewSearcher(string(data))
 	opts.ValidateJSON = false
-	s.SearchOptions = opts
-	return s.GetByPath(path...)
+	return getWithSearcher(data, opts, path...)
 }
 
 func rejectStdJSONTrailing(dec *json.Decoder) error {
