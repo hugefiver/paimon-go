@@ -804,7 +804,7 @@ func TestPerformanceReviewDocumentationFactLock(t *testing.T) {
 		"`module github.com/bytedance/sonic`",
 		"Sonic `v1.15.2`",
 		"Go 1.27",
-		"replace github.com/bytedance/sonic => ../paimon-go",
+		"replace github.com/bytedance/sonic => github.com/hugefiver/paimon-go v0.1.0",
 		"import \"github.com/bytedance/sonic\"",
 		"sonic_stdjson",
 		"sonic_jsonv2",
@@ -840,7 +840,7 @@ func TestConcurrentReadDocumentationFactLock(t *testing.T) {
 
 var performanceReviewREADMEH2Headings = []string{
 	"## 项目定位与兼容边界",
-	"## 克隆、原始 import 与本地 replace",
+	"## 使用",
 	"## 快速开始",
 	"## Root build tags",
 	"## 兼容限制",
