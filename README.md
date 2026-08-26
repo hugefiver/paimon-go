@@ -67,7 +67,7 @@ func main() {
 
 ## 基准
 
-Windows/amd64, i9-12900H, 相同 payload, 各跑 5 次取中位数, `-benchmem`, `GOPROXY=off`。本地三种模式用 Go 1.27，upstream 用 Go 1.26.7。跨工具链，仅作参考。
+Windows/amd64, i9-12900H, 相同 payload, 各跑 5 次取中位数, `-benchmem`, `GOPROXY=off`。本地用 Go 1.27，upstream 用 Go 1.26.7。跨工具链，仅作参考。
 
 | | default | `sonic_stdjson` | `sonic_jsonv2` | upstream |
 |---|---:|---:|---:|---:|
@@ -75,6 +75,17 @@ Windows/amd64, i9-12900H, 相同 payload, 各跑 5 次取中位数, `-benchmem`,
 | Unmarshal<br>medium map | 14875 ns<br>4736 B · 129 | 14975 ns<br>4736 B · 129 | 23067 ns<br>4956 B · 148 | 7061 ns<br>5402 B · 59 |
 | Valid<br>medium JSON | 1327 ns<br>0 B · 0 | 2338 ns<br>0 B · 0 | 1476 ns<br>0 B · 0 | 764.2 ns<br>0 B · 0 |
 | Get<br>nested path | 426.8 ns<br>164 B · 2 | 1540 ns<br>164 B · 2 | 933.3 ns<br>164 B · 2 | 264.3 ns<br>40 B · 2 |
+
+相对于 upstream 的耗时差异（本地纯 Go vs 上游原生/JIT，慢是正常的）：
+
+| | default | `sonic_stdjson` | `sonic_jsonv2` |
+|---|---:|---:|---:|
+| Marshal | **+61.3%** | +108.3% | *+250.5%* |
+| Unmarshal | **+110.7%** | +112.1% | *+226.7%* |
+| Valid | **+73.6%** | *+206.0%* | +93.1% |
+| Get | **+61.5%** | *+482.8%* | +253.1% |
+
+**加粗** 为该行本地最快，*斜体* 为本地最慢。
 
 复现：
 
