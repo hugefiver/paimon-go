@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: default
+            tags: ""
+            goexperiment: ""
+          - name: sonic_stdjson
+            tags: -tags=sonic_stdjson
+            goexperiment: ""
+          - name: sonic_jsonv2
+            tags: -tags=sonic_jsonv2
+            goexperiment: jsonv2
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - name: Run tests
+        env:
+          GOEXPERIMENT: ${{ matrix.goexperiment }}
+        run: go test -mod=readonly ${{ matrix.tags }} ./... -count=1
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.13.1
