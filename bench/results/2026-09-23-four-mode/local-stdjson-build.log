@@ -1,0 +1,4 @@
+PROOF mode=local-stdjson GOPROXY=off GONOPROXY=none go version go1.27.1 windows/amd64 GOEXPERIMENT='' GOTOOLCHAIN=local GOMAXPROCS=1 GOGC=100 GOAMD64=v1
+MODULE github.com/bytedance/sonic v1.15.2 replace=C:\Users\hugefiver\source\paimon-go
+SELECTED root=[api.go backend_select_default.go]
+SELECTED compatmode=[mode_stdjson.go]

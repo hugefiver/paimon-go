@@ -1,0 +1,3 @@
+PROOF mode=upstream-native GOPROXY=off GONOPROXY=none go version go1.26.7 windows/amd64 GOEXPERIMENT='' GOTOOLCHAIN=go1.26.7 GOMAXPROCS=1 GOGC=100 GOAMD64=v1
+MODULE github.com/bytedance/sonic v1.15.2 replace=
+SELECTED root=[api.go rawmessage.go sonic.go]

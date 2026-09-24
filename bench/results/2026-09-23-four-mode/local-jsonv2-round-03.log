@@ -1,0 +1,39 @@
+goos: windows
+goarch: amd64
+pkg: sonic-bench/rootbench
+cpu: 12th Gen Intel(R) Core(TM) i9-12900H
+BenchmarkMarshalSmallStruct   	  312531	      1093 ns/op	 126.22 MB/s	     336 B/op	       3 allocs/op
+BenchmarkUnmarshalMediumMap   	   12148	     22220 ns/op	  23.99 MB/s	    4872 B/op	     147 allocs/op
+BenchmarkValidMedium          	  315649	       986.8 ns/op	 540.13 MB/s	       0 B/op	       0 allocs/op
+BenchmarkGetPath              	  366219	       856.9 ns/op	     164 B/op	       2 allocs/op
+BenchmarkContainer/10/Get     	  121388	      2220 ns/op	     384 B/op	       1 allocs/op
+BenchmarkContainer/10/SearcherDefault         	  528018	       568.3 ns/op	       0 B/op	       0 allocs/op
+BenchmarkContainer/10/SearcherNoValidate      	  441325	       662.9 ns/op	       0 B/op	       0 allocs/op
+BenchmarkContainer/10/LoadAll                 	  180649	      1851 ns/op	 200.41 MB/s	     552 B/op	       6 allocs/op
+BenchmarkContainer/1000/Get                   	    1339	    205941 ns/op	   40961 B/op	       1 allocs/op
+BenchmarkContainer/1000/SearcherDefault       	    5182	     53953 ns/op	       0 B/op	       0 allocs/op
+BenchmarkContainer/1000/SearcherNoValidate    	    4678	     68260 ns/op	       0 B/op	       0 allocs/op
+BenchmarkContainer/1000/LoadAll               	    2686	    115519 ns/op	 311.73 MB/s	     552 B/op	       6 allocs/op
+BenchmarkStringGet/16/Bytes                   	 1357902	       215.5 ns/op	       2 B/op	       1 allocs/op
+BenchmarkStringGet/16/String                  	 1000000	       274.7 ns/op	      48 B/op	       1 allocs/op
+BenchmarkStringGet/16/Searcher                	 6876506	        46.08 ns/op	       0 B/op	       0 allocs/op
+BenchmarkStringGet/16/CopyString              	 1000000	       338.9 ns/op	      50 B/op	       2 allocs/op
+BenchmarkStringGet/65536/Bytes                	    8181	     41589 ns/op	       2 B/op	       1 allocs/op
+BenchmarkStringGet/65536/String               	    5348	     55070 ns/op	   73731 B/op	       1 allocs/op
+BenchmarkStringGet/65536/Searcher             	 5522136	        50.72 ns/op	       0 B/op	       0 allocs/op
+BenchmarkStringGet/65536/CopyString           	    6099	     45780 ns/op	   73733 B/op	       2 allocs/op
+BenchmarkEncoder/RootStream                   	 1138314	       260.2 ns/op	 153.75 MB/s	       0 B/op	       0 allocs/op
+BenchmarkEncoder/StdStream                    	 1281655	       241.4 ns/op	 165.71 MB/s	       0 B/op	       0 allocs/op
+BenchmarkEncoder/RootMarshal                  	  835608	       389.8 ns/op	 100.05 MB/s	      48 B/op	       1 allocs/op
+BenchmarkEncoder/EncodeIntoReuse              	 1000000	       297.8 ns/op	 130.97 MB/s	       0 B/op	       0 allocs/op
+BenchmarkDecodeNumbers/Default                	   63919	      4227 ns/op	   7.33 MB/s	     648 B/op	      23 allocs/op
+BenchmarkDecodeNumbers/UseNumber              	  111757	      2705 ns/op	  11.46 MB/s	     648 B/op	      17 allocs/op
+BenchmarkDecodeNumbers/UseInt64               	   95442	      2918 ns/op	  10.62 MB/s	     552 B/op	      11 allocs/op
+BenchmarkStringDecoder/PackageDecoder         	    5810	     50681 ns/op	  19.71 MB/s	    2168 B/op	     108 allocs/op
+BenchmarkStringDecoder/StdDecoder             	    6364	     45877 ns/op	  21.78 MB/s	    2168 B/op	     108 allocs/op
+BenchmarkPreorderDepth/64                     	  181410	      1570 ns/op	  82.17 MB/s	       0 B/op	       0 allocs/op
+BenchmarkPreorderDepth/256                    	   36676	      7933 ns/op	  64.67 MB/s	       0 B/op	       0 allocs/op
+BenchmarkPreorderDepth/1024                   	   10000	     33294 ns/op	  61.54 MB/s	       0 B/op	       0 allocs/op
+BenchmarkValidStringLarge                     	    4760	     59724 ns/op	1097.54 MB/s	   73731 B/op	       1 allocs/op
+BenchmarkUnmarshalLargeString                 	    4666	     64741 ns/op	1012.50 MB/s	   65947 B/op	       8 allocs/op
+PASS

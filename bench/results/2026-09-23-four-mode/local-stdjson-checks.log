@@ -1,0 +1,22 @@
+=== RUN   TestBenchmarkEnvironment
+    root_bench_test.go:95: PROOF mode=local-stdjson runtime=go1.27.1 APIKind=1 GOMAXPROCS=1 GOAMD64=v1 GOGC=100 GOEXPERIMENT=
+--- PASS: TestBenchmarkEnvironment (0.00s)
+=== RUN   TestBenchmarkFixtures
+    root_bench_test.go:108: FIXTURE_SHA256 small=462036fea4d4312a7cf11db20428f923cbc11b287e59b5a16d66d9a95dfcb670 bytes=138
+    root_bench_test.go:108: FIXTURE_SHA256 medium=80a3a7657dfb4f036ff55a9b003a4f2e8f47665dc1f9f84919ca1729bf86f09e bytes=533
+    root_bench_test.go:108: FIXTURE_SHA256 path=f3e12d1b8c0594d65c6add6dbd599ef3048d81b8be6d01cdb6dc9ae6bab92e08 bytes=190
+--- PASS: TestBenchmarkFixtures (0.00s)
+=== RUN   TestWorkloadFixtures
+    workloads_bench_test.go:40: FIXTURE_SHA256 container10=c63c6972c90276086a51ee7513ea9763c4004c50304dad3f2f134c635d389db1 bytes=371
+    workloads_bench_test.go:40: FIXTURE_SHA256 container1000=c382d6e9839f81b48498b52a4cb678167d119dde580c280e2e5756e48acfda54 bytes=36011
+    workloads_bench_test.go:51: FIXTURE_SHA256 string16=74c9c33dbe5326ea9dbefe5a41d0d552dc2fe05e4a69f1a3a2fd25fdef412e23 bytes=38
+    workloads_bench_test.go:51: FIXTURE_SHA256 string65536=73e5e4275e9edd74db875d90c7a2a6611e2d3f7e1a4336d4d75fcb841ecdc7ac bytes=65558
+    workloads_bench_test.go:58: FIXTURE_SHA256 depth64=f0244ae1938270f711155b0a26a4307cde7050495140dd858a88a1cfc378cf40 bytes=129
+    workloads_bench_test.go:58: FIXTURE_SHA256 depth256=9cd13e3d387f21922247827f547ec757907ddbd9abedaf6c5efa817381626d0b bytes=513
+    workloads_bench_test.go:58: FIXTURE_SHA256 depth1024=a56b95698e829e714bce0daa40e7b90e6d23ade152fd139dca00eff3e22d40bb bytes=2049
+    workloads_bench_test.go:64: FIXTURE_SHA256 largeString=3f6845620a37d1865a5dbb26c54bd41aaf2712d559ba84744d6d504a5347c4ed bytes=65550
+    workloads_bench_test.go:73: FIXTURE_SHA256 stream=76b9b8dcc6cafd6926decd06c28dbc7935f5446c9dcf60b506edc8e4b9d25010 bytes=999
+--- PASS: TestWorkloadFixtures (0.00s)
+=== RUN   TestBasicEquivalence
+--- PASS: TestBasicEquivalence (0.00s)
+PASS

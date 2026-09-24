@@ -1,0 +1,7 @@
+seed=20260923 rounds=6 benchtime=250ms pattern=.
+round-01: local-default, local-stdjson, local-jsonv2, upstream-native
+round-02: local-jsonv2, upstream-native, local-default, local-stdjson
+round-03: upstream-native, local-jsonv2, local-stdjson, local-default
+round-04: local-default, local-stdjson, local-jsonv2, upstream-native
+round-05: upstream-native, local-default, local-stdjson, local-jsonv2
+round-06: local-default, local-jsonv2, local-stdjson, upstream-native
