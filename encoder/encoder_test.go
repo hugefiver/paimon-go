@@ -267,8 +267,8 @@ func TestValidOnlyWhitespace(t *testing.T) {
 	if ok {
 		t.Fatalf("expected invalid for whitespace-only")
 	}
-	if start != 3 {
-		t.Fatalf("start = %d, want native EOF cursor 3", start)
+	if start != -1 {
+		t.Fatalf("start = %d, want native EOF cursor -1", start)
 	}
 }
 

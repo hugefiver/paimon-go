@@ -175,8 +175,9 @@ func Valid(data []byte) (ok bool, start int) {
 }
 
 // validationCursor replays the token boundaries of native ValidateOne only
-// when Skip's cursor is not sufficient. Structural/EOF errors retain Skip's
-// diagnostic cursor; literal and numeric errors use ValidateOne's cursor.
+// when Skip's cursor is not sufficient. Structural errors retain Skip's
+// diagnostic cursor; literal, numeric, and whitespace-EOF errors use
+// ValidateOne's cursor.
 func validationCursor(data []byte, fallback int) int {
 	s := validationScanner{data: data, fallback: fallback, cursor: -1}
 	if !s.value(0) {
@@ -196,6 +197,18 @@ type validationScanner struct {
 	cursor   int
 }
 
+// awaitEOF returns the cursor native reports when EOF arrives while its
+// FSM waits for the next token at position q and only whitespace remains.
+// Native probes whitespace four bytes at a time with unconditional advances
+// and reports EOF from the fourth (cursor q+3). Longer runs switch to its
+// SIMD space skip, which reports EOF without advancing (cursor q-1).
+func (s *validationScanner) awaitEOF(q int) int {
+	if len(s.data)-q <= 4 {
+		return q + 3
+	}
+	return q - 1
+}
+
 // Match native Sonic's startup SIMD selection for the supported mode overrides.
 var validationAVX2 = os.Getenv("SONIC_MODE") != "noavx" && os.Getenv("SONIC_MODE") != "noavx2"
 
@@ -211,25 +224,36 @@ func (s *validationScanner) space() {
 }
 
 func (s *validationScanner) value(depth int) bool {
+	q := s.pos
 	s.space()
 	if s.pos >= len(s.data) || depth > 4096 {
-		s.cursor = s.fallback
+		s.cursor = s.awaitEOF(q)
 		return false
 	}
 	switch s.data[s.pos] {
 	case '[':
 		s.pos++
+		q = s.pos
 		s.space()
 		if s.pos < len(s.data) && s.data[s.pos] == ']' {
 			s.pos++
 			return true
 		}
+		if s.pos >= len(s.data) {
+			s.cursor = s.awaitEOF(q)
+			return false
+		}
 		for {
 			if !s.value(depth + 1) {
 				return false
 			}
+			q = s.pos
 			s.space()
-			if s.pos >= len(s.data) || s.data[s.pos] == ']' {
+			if s.pos >= len(s.data) {
+				s.cursor = s.awaitEOF(q)
+				return false
+			}
+			if s.data[s.pos] == ']' {
 				break
 			}
 			if s.data[s.pos] != ',' {
@@ -243,32 +267,52 @@ func (s *validationScanner) value(depth int) bool {
 		}
 	case '{':
 		s.pos++
+		q = s.pos
 		s.space()
 		if s.pos < len(s.data) && s.data[s.pos] == '}' {
 			s.pos++
 			return true
 		}
+		if s.pos >= len(s.data) {
+			s.cursor = s.awaitEOF(q)
+			return false
+		}
 		for s.pos < len(s.data) && s.data[s.pos] == '"' {
 			if !s.string() {
 				break
 			}
+			q = s.pos
 			s.space()
-			if s.pos >= len(s.data) || s.data[s.pos] != ':' {
-				s.cursor = s.fallback
+			if s.pos >= len(s.data) {
+				s.cursor = s.awaitEOF(q)
+				return false
+			}
+			if s.data[s.pos] != ':' {
+				s.cursor = s.pos
 				return false
 			}
 			s.pos++
 			if !s.value(depth + 1) {
 				return false
 			}
+			q = s.pos
 			s.space()
-			if s.pos >= len(s.data) || s.data[s.pos] != ',' {
+			if s.pos >= len(s.data) {
+				s.cursor = s.awaitEOF(q)
+				return false
+			}
+			if s.data[s.pos] != ',' {
 				break
 			}
 			s.pos++
+			q = s.pos
 			s.space()
-			if s.pos >= len(s.data) || s.data[s.pos] != '"' {
-				s.cursor = s.fallback
+			if s.pos >= len(s.data) {
+				s.cursor = s.awaitEOF(q)
+				return false
+			}
+			if s.data[s.pos] != '"' {
+				s.cursor = s.pos
 				return false
 			}
 		}
