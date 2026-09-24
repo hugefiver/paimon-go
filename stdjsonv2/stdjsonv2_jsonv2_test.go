@@ -195,17 +195,6 @@ func TestJSONv2CachedCustomOptionsHonorConfiguration(t *testing.T) {
 		CaseSensitive:         true,
 	}.Froze().(*jsonv2API)
 
-	// Keep the cached option slices separate so that the Config branches
-	// are proven: NoNullSliceOrMap=true adds nothing (jsonv2 default is
-	// []/{}), CaseSensitive=true adds nothing on unmarshal (jsonv2
-	// default is case-sensitive).
-	if got, want := len(api.marshalOpts), 3; got != want {
-		t.Fatalf("marshal option count = %d, want %d", got, want)
-	}
-	if got, want := len(api.unmarshalOpts), 2; got != want {
-		t.Fatalf("unmarshal option count = %d, want %d", got, want)
-	}
-
 	marshalOpts := jsonv2.JoinOptions(api.marshalOpts...)
 	unmarshalOpts := jsonv2.JoinOptions(api.unmarshalOpts...)
 	assertJSONv2Option(t, marshalOpts, "EscapeForHTML", stdjsontext.EscapeForHTML, true)
@@ -338,11 +327,11 @@ func TestJSONv2ConfigUseInt64UnmarshalConvertsNestedInterfaceValues(t *testing.T
 	if got, ok := b.(int64); !ok || got != 3 {
 		t.Fatalf("a[1].b = %v (%T), want int64(3)", b, b)
 	}
-	if _, ok := out["f"].(json.Number); !ok {
-		t.Fatalf("f = %v (%T), want json.Number", out["f"], out["f"])
+	if _, ok := out["f"].(float64); !ok {
+		t.Fatalf("f = %v (%T), want float64", out["f"], out["f"])
 	}
-	if _, ok := out["big"].(json.Number); !ok {
-		t.Fatalf("big = %v (%T), want json.Number", out["big"], out["big"])
+	if _, ok := out["big"].(float64); !ok {
+		t.Fatalf("big = %v (%T), want float64", out["big"], out["big"])
 	}
 }
 

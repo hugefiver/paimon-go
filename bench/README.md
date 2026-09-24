@@ -1,207 +1,66 @@
 # Sonic 基准测试子项目
 
-该目录是独立 Go module，用相同 payload 对比以下四种模式：
+本目录是独立 Go module。四组使用**同一份** `rootbench` 源码和 fixture：
 
-1. local root `github.com/bytedance/sonic` 默认 Sonic-compatible 模式；
-2. local root 启用 `sonic_stdjson` 的严格 JSON 模式；
-3. local root 启用 `sonic_jsonv2` 的 JSON v2 模式；
-4. upstream `github.com/bytedance/sonic` v1.15.2。
+| 模式 | 来源 / 编译条件 | 工具链 |
+|---|---|---|
+| `local-default` | 本地 root，默认 backend | Go 1.27.x |
+| `local-stdjson` | 本地 root，`sonic_stdjson` | Go 1.27.x |
+| `local-jsonv2` | 本地 root，`sonic_jsonv2` + `GOEXPERIMENT=jsonv2` | Go 1.27.x |
+| `upstream-native` | 上游 Sonic v1.15.2，原生 `sonic.go`，`APIKind=1` | Go 1.26.7 |
 
-前三种 local 模式使用同一份 `rootbench/root_bench_test.go`，只改变 build flags，
-并使用项目要求的 Go 1.27。upstream Sonic v1.15.2 单独使用
-Go 1.26.7，以进入其支持的原生/JIT 路径。该口径保持硬件和 benchmark payload
-一致，但属于跨 Go 工具链对比。
+`go.local.mod` 将相同 module path `github.com/bytedance/sonic` replace 到仓库根目录；
+`go.mod` 不带 replace，解析到上游 v1.15.2。所有 `go` 命令均使用
+`-mod=readonly`、`GOPROXY=off` 和 `GONOPROXY=none`；显式覆盖继承的
+`GONOPROXY`（包括通过 `GOPRIVATE` 得到的默认值），避免绕开代理直连 VCS。
+缺失模块只会报离线查找失败，不会下载或修改 module 文件。
+运行前必须已缓存依赖与 Go 1.26.7 工具链，且 PATH 上的本地 Go 是 1.27.x。
+缺少缓存或版本不匹配时立即失败，不会把回退实现误记成原生 Sonic。
 
-## Module 文件
+## 运行
 
-根仓库和 upstream 都使用 module path `github.com/bytedance/sonic`，因此不能在
-一个 module graph 中同时导入两者。本目录通过两个 module 文件切换来源：
-
-- `go.mod` 没有 `replace`，解析到 upstream Sonic v1.15.2；
-- `go.local.mod` 包含 `replace github.com/bytedance/sonic => ..`，解析到本地仓库。
-
-所有 runner 命令都使用 `-mod=readonly`，不会修改 `go.mod`、`go.sum` 或
-`go.local.mod`。runner 对每个 block 强制 `GOPROXY=off`：所需 modules 和
-upstream toolchain 必须已经缓存，cache miss 会失败而不会下载。
-
-## 一键运行
-
-从本目录执行：
+从 `bench` 目录运行：
 
 ```powershell
 pwsh -NoProfile -File .\run.ps1
+# 快速走通所有模式（不适合做性能结论）：
+pwsh -NoProfile -File .\run.ps1 -Rounds 1 -Benchtime 1x -Seed 42 -OutputDir "$env:TEMP\paimon-bench-smoke"
 ```
 
-runner 会串行执行四个 block，每项 benchmark 串行运行 5 次并输出内存分配：
+参数：`-Rounds` 默认 6、`-Benchtime` 默认 `250ms`（也支持 `1x`）、
+`-Seed` 默认 `20260923`、`-BenchmarkPattern` 默认 `.`、`-OutputDir` 默认
+`bench/results/<时间戳>`。输出目录必须尚不存在；可用唯一目录名重试。
+`-BenchmarkPattern` 是 Go 的 `-test.bench` 正则；缩小范围时，仍会对**全部**
+四组执行构建与正确性检查。不要将 `1x` 结果用于性能判断。
 
-- `=== local root sonic/default ===`
-- `=== local root stdjson tag ===`
-- `=== local root jsonv2 tag ===`
-- `=== upstream sonic v1.15.2 / Go 1.26.7 ===`
+计时前 runner 检查 `go version` / `GOPROXY` / `GONOPROXY` / `GOEXPERIMENT`、module 来源与
+实际选中的 Go 源文件，并为四组分别预编译 test exe；每组 checks 与计时
+进程显式设置 `BENCH_MODE`，由二进制内部验证运行时条件（上游还需 `APIKind=1`）。
+runner 要求 checks 日志出现对应 `PROOF`，再比较 fixture 哈希并验证正确性；
+任一失败都不会启动计时。每轮
+按固定种子洗牌四组，串行启动**新的** test 进程（每组每轮 `-test.count=1`）；
+每个叶子 benchmark 在进程内预热相关调用并在计时前重置 timer。
+解码每次使用新目标；流式/复用类 benchmark 明确标识其复用条件。运行时固定
+`GOMAXPROCS=1`、`GOGC=100`、`GOAMD64=v1`；退出时恢复调用者的工作目录及
+`BENCH_MODE`、`GOPROXY`、`GONOPROXY`、`GOEXPERIMENT`、`GOTOOLCHAIN` 和上述三个环境变量。
 
-runner 在 local JSON v2 block 临时设置 `GOEXPERIMENT=jsonv2`，在 upstream block
-临时设置 `GOTOOLCHAIN=go1.26.7` 并移除 `GOEXPERIMENT`。所有四个 block 均在
-`GOPROXY=off` 下执行；每块在启动 benchmark 前验证 `$env:GOPROXY`、`go env GOPROXY`
-精确为 `off`，并验证完整 `go version` 包含 local 所需的 `go1.27` 或 upstream 所需的
-`go1.26.7`。验证成功后，日志会打印稳定的
-`PROOF: label=<block>; GOPROXY=off; go version=<完整 go version>` 行；任一命令失败或
-值不符都会立即终止，因而不会执行该块 benchmark。缺少缓存的 module 或 toolchain 也会
-失败而不会下载。无论成功还是异常，runner 都会精确恢复调用者原有的 `GOPROXY`、
-`GOEXPERIMENT` 和 `GOTOOLCHAIN` 的存在性和值。
+输出目录只保留各组 build/source 证明及 checks 日志、逐轮原始
+`ns/op`/`MB/s`（有设置 bytes 时）/`B/op`/`allocs/op`、`order.txt` 和
+`summary.csv`。仅在本次新建的结果目录内，本次生成的四个 test exe 会在
+成功或失败时由 `finally` 精确删除；已有结果目录绝不删除。runner 检查各组
+各轮 benchmark 名称一致且都有样本，再按名称
+计算 `ns/op` 中位数、范围和样本标准差 / 均值的 CV（百分比；仅一轮时为 0）。
+请先看逐轮波动：中位数和 CV 不是显著性检验。`SetBytes` 表示输入 JSON 的
+字节数或输出 JSON 的标称字节数；Get / Searcher 可能只扫描部分输入，故不
+给它们标注吞吐量。复用流 decoder 一次操作包含 100 条消息。
 
-## 手动命令
+## 比较范围
 
-下列命令均在离线环境运行。每个示例使用 `try`/`finally` 临时设置
-`$env:GOPROXY = 'off'`，并精确恢复调用者原有环境变量的存在性和值。使用 runner
-可自动完成相同恢复。
-
-### Local root/default
-
-```powershell
-$hadProxy = Test-Path Env:GOPROXY
-$oldProxy = $env:GOPROXY
-try {
-    $env:GOPROXY = 'off'
-    $arguments = @(
-        'test',
-        '-mod=readonly',
-        '-modfile=go.local.mod',
-        '-run=^$',
-        '-bench=.',
-        '-benchmem',
-        '-count=5',
-        './rootbench'
-    )
-    & go @arguments
-}
-finally {
-    if ($hadProxy) {
-        $env:GOPROXY = $oldProxy
-    }
-    else {
-        Remove-Item Env:GOPROXY -ErrorAction SilentlyContinue
-    }
-}
-```
-
-### Local root/strict
-
-```powershell
-$hadProxy = Test-Path Env:GOPROXY
-$oldProxy = $env:GOPROXY
-try {
-    $env:GOPROXY = 'off'
-    $arguments = @(
-        'test',
-        '-mod=readonly',
-        '-modfile=go.local.mod',
-        '-tags=sonic_stdjson',
-        '-run=^$',
-        '-bench=.',
-        '-benchmem',
-        '-count=5',
-        './rootbench'
-    )
-    & go @arguments
-}
-finally {
-    if ($hadProxy) {
-        $env:GOPROXY = $oldProxy
-    }
-    else {
-        Remove-Item Env:GOPROXY -ErrorAction SilentlyContinue
-    }
-}
-```
-
-### Local root/JSON v2
-
-```powershell
-$hadProxy = Test-Path Env:GOPROXY
-$oldProxy = $env:GOPROXY
-$hadExperiment = Test-Path Env:GOEXPERIMENT
-$oldExperiment = $env:GOEXPERIMENT
-try {
-    $env:GOPROXY = 'off'
-    $env:GOEXPERIMENT = 'jsonv2'
-    $arguments = @(
-        'test',
-        '-mod=readonly',
-        '-modfile=go.local.mod',
-        '-tags=sonic_jsonv2',
-        '-run=^$',
-        '-bench=.',
-        '-benchmem',
-        '-count=5',
-        './rootbench'
-    )
-    & go @arguments
-}
-finally {
-    if ($hadExperiment) {
-        $env:GOEXPERIMENT = $oldExperiment
-    }
-    else {
-        Remove-Item Env:GOEXPERIMENT -ErrorAction SilentlyContinue
-    }
-    if ($hadProxy) {
-        $env:GOPROXY = $oldProxy
-    }
-    else {
-        Remove-Item Env:GOPROXY -ErrorAction SilentlyContinue
-    }
-}
-```
-
-### Upstream Sonic v1.15.2 / Go 1.26.7
-
-```powershell
-$hadProxy = Test-Path Env:GOPROXY
-$oldProxy = $env:GOPROXY
-$hadToolchain = Test-Path Env:GOTOOLCHAIN
-$oldToolchain = $env:GOTOOLCHAIN
-$hadExperiment = Test-Path Env:GOEXPERIMENT
-$oldExperiment = $env:GOEXPERIMENT
-try {
-    $env:GOPROXY = 'off'
-    $env:GOTOOLCHAIN = 'go1.26.7'
-    Remove-Item Env:GOEXPERIMENT -ErrorAction SilentlyContinue
-    $arguments = @(
-        'test',
-        '-mod=readonly',
-        '-run=^$',
-        '-bench=.',
-        '-benchmem',
-        '-count=5',
-        './rootbench'
-    )
-    & go @arguments
-}
-finally {
-    if ($hadToolchain) {
-        $env:GOTOOLCHAIN = $oldToolchain
-    }
-    else {
-        Remove-Item Env:GOTOOLCHAIN -ErrorAction SilentlyContinue
-    }
-    if ($hadExperiment) {
-        $env:GOEXPERIMENT = $oldExperiment
-    }
-    else {
-        Remove-Item Env:GOEXPERIMENT -ErrorAction SilentlyContinue
-    }
-    if ($hadProxy) {
-        $env:GOPROXY = $oldProxy
-    }
-    else {
-        Remove-Item Env:GOPROXY -ErrorAction SilentlyContinue
-    }
-}
-```
-
-## 结果解释
-
-- 基准仅用于同机横向参考，不构成性能承诺。
-- local 与 upstream 使用不同 Go 版本，结果同时包含实现和工具链差异。
-- 笔记本电源策略、温度、后台负载和 Go patch 版本都会影响结果。
-- 发布级性能判断应增加运行次数、固定 CPU 条件，并使用 `benchstat` 进行统计分析。
+local 与 upstream 使用不同 Go 版本，因此结果**同时包含工具链与实现差异**，
+不是严格的同工具链性能归因。`APIKind=1` 只对 upstream 验证 native 选择；
+本地 root 的 APIKind 不能说明是否 JIT，构建 tag 也不影响所有 AST / 子包
+workload。`BenchmarkEncoder/StdStream` 和 `BenchmarkStringDecoder/StdDecoder`
+是相同 fixture 的标准库基线，不应当成 Sonic 实现模式。CPU 频率、温度、后台
+负载等仍会影响波动；如需发布级结论，应固定机器条件、检查原始数据并做进一步
+统计。本地同工具链优化对照及原始日志另见
+[docs/performance.md](../docs/performance.md)。

@@ -1,16 +1,19 @@
 package main
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
+	"runtime"
 	"strconv"
 
 	"github.com/bytedance/sonic"
 	"github.com/bytedance/sonic/ast"
+	"github.com/bytedance/sonic/encoder"
 )
 
 const maxRequestBytes = 1 << 20
@@ -30,6 +33,8 @@ type request struct {
 
 type result struct {
 	Valid              bool   `json:"valid"`
+	EncoderValid       bool   `json:"encoder_valid"`
+	EncoderValidStart  int    `json:"encoder_valid_start"`
 	UnmarshalOK        bool   `json:"unmarshal_ok"`
 	MarshalOK          bool   `json:"marshal_ok"`
 	Normalized         string `json:"normalized,omitempty"`
@@ -44,6 +49,13 @@ type result struct {
 }
 
 func main() {
+	if len(os.Args) == 2 && os.Args[1] == "--info" {
+		_ = json.NewEncoder(os.Stdout).Encode(struct {
+			GoVersion string `json:"go_version"`
+			APIKind   int    `json:"api_kind"`
+		}{runtime.Version(), sonic.APIKind})
+		return
+	}
 	res := run()
 	if err := json.NewEncoder(os.Stdout).Encode(res); err != nil {
 		fmt.Fprintf(os.Stderr, "encode result: %v\n", err)
@@ -61,14 +73,15 @@ func run() result {
 		return result{}
 	}
 
-	res := result{Valid: sonic.Valid(data)}
+	ok, start := encoder.Valid(data)
+	res := result{Valid: sonic.Valid(data), EncoderValid: ok, EncoderValidStart: start}
 
 	var v interface{}
 	if err := sonic.Unmarshal(data, &v); err == nil {
 		res.UnmarshalOK = true
 		if normalized, err := sonic.Marshal(v); err == nil {
 			res.MarshalOK = true
-			res.Normalized = string(normalized)
+			res.Normalized = canonicalJSON(normalized)
 		}
 	}
 
@@ -96,6 +109,27 @@ func run() result {
 	res.NewRawType = int(ast.NewRaw(string(data)).Type())
 
 	return res
+}
+
+// Compare JSON values independently of permitted map ordering and escaping
+// differences. Invalid marshal output stays invalid and is rejected by the driver.
+func canonicalJSON(data []byte) string {
+	if !json.Valid(data) {
+		return "invalid marshaled JSON: " + string(data)
+	}
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.UseNumber()
+	var value any
+	if err := dec.Decode(&value); err != nil {
+		return "invalid marshaled JSON: " + string(data)
+	}
+	var out bytes.Buffer
+	enc := json.NewEncoder(&out)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(value); err != nil {
+		return "invalid marshaled JSON: " + string(data)
+	}
+	return string(bytes.TrimSuffix(out.Bytes(), []byte{'\n'}))
 }
 
 func readRequest(r io.Reader) (request, error) {
@@ -137,7 +171,7 @@ func (v *recordingVisitor) OnFloat64(value float64, raw json.Number) error {
 func recordPreorderOnlyNumber(data string) string {
 	visitor := recordingVisitor{}
 	err := ast.Preorder(data, &visitor, &ast.VisitorOptions{OnlyNumber: true})
-	if err != nil || hasRawControlInString(data) {
+	if err != nil {
 		return `["error"]`
 	}
 	encoded, err := json.Marshal(visitor.events)
@@ -145,34 +179,6 @@ func recordPreorderOnlyNumber(data string) string {
 		return "[\"error\"]"
 	}
 	return string(encoded)
-}
-
-func hasRawControlInString(data string) bool {
-	inString := false
-	escaped := false
-	for i := 0; i < len(data); i++ {
-		if !inString {
-			if data[i] == '"' {
-				inString = true
-			}
-			continue
-		}
-		if escaped {
-			escaped = false
-			continue
-		}
-		switch data[i] {
-		case '\\':
-			escaped = true
-		case '"':
-			inString = false
-		default:
-			if data[i] < 0x20 {
-				return true
-			}
-		}
-	}
-	return false
 }
 
 func convertPath(parts []pathPart) []interface{} {

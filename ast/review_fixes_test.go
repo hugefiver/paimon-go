@@ -37,68 +37,32 @@ func TestStringNodeInvalidUTF8DoesNotSwallowDelimiter(t *testing.T) {
 	}
 }
 
-// Leading-zero numbers must round-trip verbatim (Sonic keeps the full
-// literal) instead of being silently truncated to "0".
-func TestLeadingZeroNumberLiteralsPreserved(t *testing.T) {
+// The native scanner stops a root number at its leading zero. Containers
+// reject the leftover digit, but a targeted raw lookup returns the first token.
+func TestNativeLeadingZeroNumberBoundaries(t *testing.T) {
 	n, code := NewParser("[0123]").Parse()
 	if code != 0 {
-		t.Fatalf("Parse([0123]) code = %v", code)
+		t.Fatalf("container Parse: %v", code)
 	}
-	got, err := n.Index(0).Raw()
-	if err != nil {
-		t.Fatalf("Raw() error = %v", err)
+	if err := n.Index(0).Check(); err == nil {
+		t.Fatal("container accepted leading-zero number")
 	}
-	if got != "0123" {
-		t.Fatalf("leading-zero literal = %q; want 0123", got)
+	root := NewRaw("0123")
+	assertNodeRaw(t, &root, "0")
+	for _, validate := range []bool{false, true} {
+		s := NewSearcher(`{"a":0123}`)
+		s.ValidateJSON = validate
+		child, err := s.GetByPath("a")
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertNodeRaw(t, &child, "0")
 	}
-
-	rawNode := NewRaw("0123")
-	got, err = rawNode.Raw()
-	if err != nil {
-		t.Fatalf("NewRaw(0123).Raw() error = %v", err)
-	}
-	if got != "0123" {
-		t.Fatalf("NewRaw(0123).Raw() = %q; want 0123", got)
-	}
-
-	s := NewSearcher(`{"a":0123}`)
-	child, err := s.GetByPath("a")
-	if err != nil {
-		t.Fatalf("Searcher.GetByPath leading-zero error = %v", err)
-	}
-	got, err = child.Raw()
-	if err != nil {
-		t.Fatalf("Searcher child Raw() error = %v", err)
-	}
-	if got != "0123" {
-		t.Fatalf("Searcher leading-zero Raw() = %q; want 0123", got)
-	}
-
-	sNoValidate := NewSearcher(`{"a":0123}`)
-	sNoValidate.ValidateJSON = false
-	child, err = sNoValidate.GetByPath("a")
-	if err != nil {
-		t.Fatalf("Searcher(no validate).GetByPath leading-zero error = %v", err)
-	}
-	got, err = child.Raw()
-	if err != nil {
-		t.Fatalf("Searcher(no validate) child Raw() error = %v", err)
-	}
-	if got != "0123" {
-		t.Fatalf("Searcher(no validate) leading-zero Raw() = %q; want 0123", got)
-	}
-
-	var sb strings.Builder
-	if err := Preorder(`[0123]`, &collectVisitor{sb: &sb}, nil); err != nil {
-		t.Fatalf("Preorder([0123]) error = %v", err)
-	}
-	if !strings.Contains(sb.String(), "int:0123;") {
-		t.Fatalf("Preorder([0123]) output = %q; want int callback with raw 0123", sb.String())
+	if _, err := NewSearcher(`{"a":0123}`).GetByPath(); err == nil {
+		t.Fatal("validated root accepted leading-zero number")
 	}
 }
 
-// An unpaired \uD800 surrogate decodes to U+FFFD (Sonic semantics),
-// both as a value and as an object key that stays addressable.
 func TestUnpairedSurrogateBecomesReplacementChar(t *testing.T) {
 	n, code := NewParser(`"\ud800"`).Parse()
 	if code != 0 {
@@ -542,7 +506,11 @@ func TestGetIndexUnsupportedAndMissingSemantics(t *testing.T) {
 			if tt.node == nil || tt.node.Type() != V_ERROR {
 				t.Fatalf("scalar.%s result = %#v, want V_ERROR node", tt.name, tt.node)
 			}
-			if err := tt.node.Check(); !errors.Is(err, ErrUnsupportType) {
+			if err := tt.node.Check(); tt.name == "Index" {
+				if err == nil || err.Error() != "unsupported type: 7" || errors.Is(err, ErrUnsupportType) {
+					t.Fatalf("scalar.Index Check() = %v, want detailed native type error", err)
+				}
+			} else if !errors.Is(err, ErrUnsupportType) {
 				t.Fatalf("scalar.%s Check() = %v, want ErrUnsupportType", tt.name, err)
 			}
 		})
@@ -579,11 +547,11 @@ func TestCapMatchesSonicContract(t *testing.T) {
 		t.Fatalf("V_NULL Cap() = %d, %v; want 0, nil", got, err)
 	}
 
-	array := Node{typ: V_ARRAY, exists: true, loaded: true, arr: make([]Node, 1, 4)}
+	array := Node{typ: V_ARRAY, exists: true, loaded: true, arr: make([]*Node, 1, 4)}
 	if got, err := array.Cap(); err != nil || got != 4 {
 		t.Fatalf("array Cap() = %d, %v; want 4, nil", got, err)
 	}
-	object := Node{typ: V_OBJECT, exists: true, loaded: true, obj: make([]Pair, 1, 3)}
+	object := Node{typ: V_OBJECT, exists: true, loaded: true, obj: make([]*Pair, 1, 3)}
 	if got, err := object.Cap(); err != nil || got != 3 {
 		t.Fatalf("object Cap() = %d, %v; want 3, nil", got, err)
 	}
@@ -934,27 +902,27 @@ func TestParserParseNonEmptyContainersAreLazyAndIncremental(t *testing.T) {
 	})
 }
 
-// Invalid scalar and string attempts preserve their original starting cursor,
-// even if recognition skipped leading whitespace.
-func TestParserParseMalformedAttemptsKeepStartPosition(t *testing.T) {
+// Native scalar failures retain the absolute scanner position.
+func TestParserParseMalformedAttemptsReportPosition(t *testing.T) {
 	for _, tt := range []struct {
 		name string
 		src  string
+		pos  int
 		want nativetypes.ParsingError
 	}{
-		{name: "invalid character after whitespace", src: "  @", want: nativetypes.ERR_INVALID_CHAR},
-		{name: "unterminated string", src: "\"unterminated", want: nativetypes.ERR_EOF},
+		{name: "invalid character after whitespace", src: "  @", pos: 2, want: nativetypes.ERR_INVALID_CHAR},
+		{name: "unterminated string", src: "\"unterminated", pos: 13, want: nativetypes.ERR_EOF},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			p := NewParser(tt.src)
 			if _, code := p.Parse(); code != tt.want {
 				t.Fatalf("Parse(%q) code = %v; want %v", tt.src, code, tt.want)
 			}
-			if p.Pos() != 0 {
-				t.Fatalf("Parse(%q) Pos = %d; want 0", tt.src, p.Pos())
+			if p.Pos() != tt.pos {
+				t.Fatalf("Parse(%q) Pos = %d; want %d", tt.src, p.Pos(), tt.pos)
 			}
-			if got := p.ExportError(tt.want).Error(); !strings.Contains(got, "at index 0") {
-				t.Fatalf("ExportError(%v) = %q; want absolute index 0", tt.want, got)
+			if got := p.ExportError(tt.want).Error(); !strings.Contains(got, "at index "+strconv.Itoa(tt.pos)) {
+				t.Fatalf("ExportError(%v) = %q; want absolute index %d", tt.want, got, tt.pos)
 			}
 		})
 	}

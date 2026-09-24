@@ -1,8 +1,7 @@
-// Package sonic is a drop-in replacement for github.com/bytedance/sonic
-// v1.15.2. This phase exposes the full public API surface (Config, API,
-// Encoder, Decoder, package-level helpers, NoCopyRawMessage, Pretouch)
-// backed by an internal reflection fallback. Later tasks swap in
-// fastjson-based and stdjsonv2-based backends behind the same interface.
+// Package sonic provides a pure Go implementation of the Sonic v1.15.2 API.
+// Build tags select the default reflection backend, strict JSON validation,
+// or a JSON-v2 backend. Supported options and behavioral boundaries are
+// documented in docs/compatibility.md.
 //
 // The root API is intentionally a thin façade over a backend.Backend so
 // the public surface stays stable as engines change.
@@ -19,8 +18,8 @@ import (
 	"github.com/bytedance/sonic/option"
 )
 
-// Backend selection constants. The library always selects UseSonicJSON in
-// this phase; UseStdJSON is exposed for API compatibility.
+// Backend selection constants. APIKind identifies the Sonic-compatible API;
+// it does not imply that a native or JIT codec is in use.
 const (
 	UseStdJSON = iota
 	UseSonicJSON
@@ -121,13 +120,19 @@ type api struct {
 	bknd backend.Backend
 }
 
-// Froze freezes the configuration into an immutable API instance. The
-// returned API honors every field of the originating Config.
+// Froze freezes the configuration into an immutable API instance, safe for
+// concurrent use. The selected backend determines which options are supported.
 func (cfg Config) Froze() API {
 	normalized := cfg.toBackend()
 	return &api{
 		cfg:  cfg,
 		bknd: newBackend(normalized),
+	}
+}
+
+func (cfg Config) checkDecoderOptions() {
+	if cfg.UseInt64 && cfg.UseNumber {
+		panic("can't set OptionUseInt64 and OptionUseNumber both!")
 	}
 }
 
@@ -174,10 +179,12 @@ func (a *api) MarshalIndent(v interface{}, prefix, indent string) ([]byte, error
 }
 
 func (a *api) UnmarshalFromString(buf string, val interface{}) error {
+	a.cfg.checkDecoderOptions()
 	return a.bknd.Unmarshal([]byte(buf), val, a.cfg.toBackend())
 }
 
 func (a *api) Unmarshal(buf []byte, val interface{}) error {
+	a.cfg.checkDecoderOptions()
 	return a.bknd.Unmarshal(buf, val, a.cfg.toBackend())
 }
 
@@ -186,11 +193,19 @@ func (a *api) NewEncoder(writer io.Writer) Encoder {
 }
 
 func (a *api) NewDecoder(reader io.Reader) Decoder {
+	a.cfg.checkDecoderOptions()
 	return a.bknd.NewDecoder(reader, a.cfg.toBackend())
 }
 
 func (a *api) Valid(data []byte) bool {
 	return a.bknd.Valid(data)
+}
+
+func (a *api) validString(data string) bool {
+	if b, ok := a.bknd.(interface{ ValidString(string) bool }); ok {
+		return b.ValidString(data)
+	}
+	return a.Valid([]byte(data))
 }
 
 // ---------------------------------------------------------------------------
@@ -215,6 +230,10 @@ func (defaultBackend) Unmarshal(data []byte, v interface{}, cfg backend.Config) 
 
 func (defaultBackend) Valid(data []byte) bool {
 	return fastjsoncompat.Valid(data)
+}
+
+func (defaultBackend) ValidString(data string) bool {
+	return fastjsoncompat.ValidString(data)
 }
 
 func (defaultBackend) Get(data []byte, opts ast.SearchOptions, path ...interface{}) (ast.Node, error) {
@@ -291,7 +310,10 @@ func Valid(data []byte) bool {
 
 // ValidString is the string-input form of Valid.
 func ValidString(data string) bool {
-	return Valid([]byte(data))
+	if a, ok := ConfigDefault.(*api); ok {
+		return a.validString(data)
+	}
+	return ConfigDefault.Valid([]byte(data))
 }
 
 // Get resolves path against data and returns the matching AST node using
@@ -302,13 +324,13 @@ func Get(data []byte, path ...interface{}) (ast.Node, error) {
 
 // GetFromString is the string-input form of Get.
 func GetFromString(data string, path ...interface{}) (ast.Node, error) {
-	return selectedGet([]byte(data), ast.SearchOptions{}, path...)
+	return selectedGetString(data, ast.SearchOptions{ValidateJSON: true}, path...)
 }
 
 // GetCopyFromString is like GetFromString but returns a node that is safe
 // to retain.
 func GetCopyFromString(data string, path ...interface{}) (ast.Node, error) {
-	return selectedGet([]byte(data), ast.SearchOptions{CopyReturn: true}, path...)
+	return selectedGetString(data, ast.SearchOptions{ValidateJSON: true, CopyReturn: true}, path...)
 }
 
 // GetWithOptions resolves path with explicit search options.

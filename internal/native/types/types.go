@@ -8,6 +8,8 @@
 // parser machinery is intentionally not implemented.
 package types
 
+import "fmt"
+
 // ParsingError is a numeric parsing error code used by the AST/parser
 // layers. The zero value denotes "no error".
 type ParsingError uint
@@ -34,44 +36,38 @@ const (
 )
 
 // Error implements the error interface. It returns the same text as
-// Message so callers can use ParsingError values interchangeably as
-// errors. The zero value returns an empty string, matching Sonic's
-// "no error" sentinel behavior.
-func (e ParsingError) Error() string { return e.Message() }
+// Message with Sonic's parsing-error prefix.
+func (e ParsingError) Error() string { return "json: error when parsing input: " + e.Message() }
 
 // Message returns a stable, human-readable description of the error
 // code. The zero value returns "" to indicate no error. Unknown codes
-// return "unknown parsing error".
+// return fmt.Sprintf("unknown error %d", e).
 func (e ParsingError) Message() string {
 	switch e {
 	case 0:
-		return ""
+		return "ok"
 	case ERR_EOF:
 		return "eof"
 	case ERR_INVALID_CHAR:
 		return "invalid char"
 	case ERR_INVALID_ESCAPE:
-		return "invalid escape"
+		return "invalid escape char"
 	case ERR_INVALID_UNICODE:
-		return "invalid unicode"
+		return "invalid unicode escape"
 	case ERR_INTEGER_OVERFLOW:
 		return "integer overflow"
 	case ERR_INVALID_NUMBER_FMT:
 		return "invalid number format"
 	case ERR_RECURSE_EXCEED_MAX:
-		return "recursion exceeds max depth"
+		return "recursion exceeded max depth"
 	case ERR_FLOAT_INFINITY:
-		return "float infinity"
+		return "float number is infinity"
 	case ERR_MISMATCH:
-		return "mismatch"
+		return "mismatched type with value"
 	case ERR_INVALID_UTF8:
-		return "invalid utf8"
-	case ERR_NOT_FOUND:
-		return "not found"
-	case ERR_UNSUPPORT_TYPE:
-		return "unsupported type"
+		return "invalid UTF8"
 	default:
-		return "unknown parsing error"
+		return fmt.Sprintf("unknown error %d", e)
 	}
 }
 

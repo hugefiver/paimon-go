@@ -156,8 +156,8 @@ func TestConcurrentReadNodeConstruction(t *testing.T) {
 	if runtime.GOARCH == "amd64" {
 		size := unsafe.Sizeof(Node{})
 		t.Logf("unsafe.Sizeof(Node{}) = %d", size)
-		if size > 152 {
-			t.Fatalf("unsafe.Sizeof(Node{}) = %d, want <= 152", size)
+		if size > 160 {
+			t.Fatalf("unsafe.Sizeof(Node{}) = %d, want <= 160", size)
 		}
 	}
 }

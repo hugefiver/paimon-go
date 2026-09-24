@@ -1,22 +1,21 @@
-# Sonic differential fuzz harness
+# Native Sonic differential tests
 
-This directory contains a smoke differential harness for comparing this repository's `github.com/bytedance/sonic` replacement with the real upstream Sonic v1.15.2 module. It is intended for the default mode, where non-standard Sonic parser behavior is enabled for hot raw JSON paths because it is faster than strict standard validation in this implementation.
+This independent module compares the local replacement with upstream Sonic v1.15.2. The local and upstream implementations share a module path, so they are built as separate helper executables using `go build -mod=readonly`.
 
-The repository itself uses the same module path as upstream Sonic, so a single Go module cannot import both implementations at once. To avoid that same-module-path collision, the harness is split into three modules:
+The local helper uses the repository's Go 1.27 toolchain. The upstream helper uses **Go 1.26.7** by default; Go 1.27 would silently select upstream's standard-library fallback. Each helper exposes its Go version and `APIKind`, and the harness rejects the fallback. `SONIC_DIFFTEST_UPSTREAM_TOOLCHAIN` can select another supported native toolchain. Builds may download missing modules/toolchains unless `GOPROXY=off` is set.
 
-- `local/` imports `github.com/bytedance/sonic v1.15.2` but uses `replace github.com/bytedance/sonic => ../..`, so its helper exercises the local checkout.
-- `upstream/` imports `github.com/bytedance/sonic v1.15.2` without a replace directive, so its helper exercises the real upstream release.
-- The top-level `difftest/` module runs both helpers and compares their JSON results.
+The helpers are built once in an owned temporary directory and then invoked directly. Requests contain base64 JSON input, avoiding command-line encoding issues. Each invocation has a 30-second deadline and a bounded `Cmd.WaitDelay`; candidate inputs are limited to 64 KiB and requests/responses to 1 MiB. Fuzz workers share the built helpers. Invalid protocol requests return an empty result.
 
-The helper protocol sends fuzz payloads through stdin as JSON. The raw candidate bytes are base64 encoded in the request, which avoids Windows command-line length limits and avoids command-line quoting issues. Helpers write only the JSON result to stdout; the driver parses stdout only and captures stderr separately so diagnostic output cannot pollute the protocol.
+Raw tests compare validity, decode/encode success, independently validated/canonicalized re-encoding, root/path lookup, Searcher, actual Preorder number callbacks and raw node type. The helper exercises default Sonic marshaling, then independently validates and canonicalizes its JSON output with the standard library. This preserves number tokens while ignoring permitted map ordering and escape-spelling differences (including U+2028/U+2029). Exact representations for supported ordinary cases are checked by the shared consumer. Raw-control inputs additionally use an independent normalization/token oracle; native Sonic accepts them. Invalid UTF-8 in protocol result strings is normalized by the standard JSON transport, so these fields do not assert byte-for-byte invalid-UTF-8 preservation.
 
-The driver builds direct helper executables once per test process in an owned OS temporary directory using `go build -mod=readonly`, then invokes those executables directly with `exec.CommandContext`. Fuzz workers inherit that temporary directory instead of rebuilding helpers. Each helper process has a 30-second deadline and a bounded `Cmd.WaitDelay`, so a timeout supervises the actual helper executable. Differential fuzz candidates are limited to 64 KiB before base64 encoding, and both the encoded JSON request and helper JSON response are limited to 1 MiB. The helpers bound stdin reads to 1 MiB and return an empty result for malformed or oversized protocol requests. Ordinary candidates compare every result field strictly. The documented raw-control-in-string difference is an explicit oracle: local Sonic must accept and normalize it while upstream rejects it, while both implementations' raw AST entry points agree after invalid UTF-8 in string tokens is normalized to U+FFFD.
+`testdata/contract/main.go` is compiled unchanged against upstream and each local backend. This catches missing methods and compares ordinary representation, number modes and panic timing, custom callbacks, retained state/cycles, streams, quoting/unquoting, and AST mutation behavior. Intentional strict raw-input differences of the two opt-in backends are tested in the root module instead.
 
-## Commands
+From the repository root:
 
-From `difftest/`:
-
-```powershell
-go test -mod=readonly -run Test -count=1
-go test -mod=readonly -run=Fuzz -fuzz=FuzzUpstreamSonicParity -fuzztime=10s
+```sh
+go -C difftest test -mod=readonly ./... -count=1
+go -C difftest test -mod=readonly -run='^$' -fuzz='^FuzzUpstreamSonicParity$' -fuzztime=60s -parallel=1
+GOTOOLCHAIN=go1.26.7 go -C difftest/upstream test -mod=readonly ./... -count=1
 ```
+
+The new native harness found `1+00` accepted as a prefix number by the old local scanner; its regression corpus is committed under `testdata/fuzz`. Behavioral boundaries that are not claimed as identical are documented in [compatibility notes](../docs/compatibility.md).

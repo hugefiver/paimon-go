@@ -12,3 +12,7 @@ var _ = sonicJSONV2RequiresGOEXPERIMENTJSONV2
 func newBackend(backend.Config) backend.Backend { return nil }
 
 func selectedGet([]byte, ast.SearchOptions, ...interface{}) (ast.Node, error) { return ast.Node{}, nil }
+
+func selectedGetString(string, ast.SearchOptions, ...interface{}) (ast.Node, error) {
+	return ast.Node{}, nil
+}

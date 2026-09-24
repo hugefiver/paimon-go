@@ -74,8 +74,8 @@ func (p *preorderParser) parseObject(visitor Visitor) error {
 	// Consume '{'.
 	p.pos++
 	p.skipWhitespace()
-	// Estimate capacity from the source between '{' and matching '}'.
-	capacity := p.guessContainerSize()
+	// Sonic v1.15.2 uses the same fixed suggestion for every container.
+	capacity := 16
 	if err := visitor.OnObjectBegin(capacity); err != nil {
 		if err == VisitOPSkip {
 			// Skip the object body but still emit the end event.
@@ -135,7 +135,7 @@ func (p *preorderParser) parseArray(visitor Visitor) error {
 	// Consume '['.
 	p.pos++
 	p.skipWhitespace()
-	capacity := p.guessContainerSize()
+	capacity := 16
 	if err := visitor.OnArrayBegin(capacity); err != nil {
 		if err == VisitOPSkip {
 			if err := p.skipContainer('['); err != nil {
@@ -196,53 +196,12 @@ func (p *preorderParser) parseNull(visitor Visitor) error {
 
 func (p *preorderParser) parseNumber(visitor Visitor) error {
 	start := p.pos
-	// Scan a Sonic-compatible JSON number. Sonic preserves leading-zero
-	// digit runs verbatim instead of truncating after the first zero.
-	s := p.src
-	if p.pos < len(s) && s[p.pos] == '-' {
-		p.pos++
+	lp := localParser{src: p.src, pos: p.pos}
+	numStr, code := lp.parseNumber()
+	p.pos = lp.pos
+	if code != 0 {
+		return &SyntaxError{Pos: p.pos, Src: p.src, Code: code}
 	}
-	if p.pos >= len(s) || s[p.pos] < '0' || s[p.pos] > '9' {
-		return &SyntaxError{Pos: p.pos, Src: p.src, Code: nativetypes.ERR_INVALID_NUMBER_FMT, Msg: "invalid number"}
-	}
-	if s[p.pos] == '0' {
-		p.pos++
-		for p.pos < len(s) && s[p.pos] >= '0' && s[p.pos] <= '9' {
-			p.pos++
-		}
-	} else {
-		for p.pos < len(s) && s[p.pos] >= '0' && s[p.pos] <= '9' {
-			p.pos++
-		}
-	}
-	if p.pos < len(s) && s[p.pos] == '.' {
-		p.pos++
-		if p.pos >= len(s) || s[p.pos] < '0' || s[p.pos] > '9' {
-			return &SyntaxError{Pos: p.pos, Src: p.src, Code: nativetypes.ERR_INVALID_NUMBER_FMT, Msg: "invalid fraction"}
-		}
-		for p.pos < len(s) && s[p.pos] >= '0' && s[p.pos] <= '9' {
-			p.pos++
-		}
-	}
-	if p.pos < len(s) && (s[p.pos] == 'e' || s[p.pos] == 'E') {
-		p.pos++
-		if p.pos < len(s) && isJSONNumberTerminator(s[p.pos]) {
-			if p.onlyNumber {
-				return visitor.OnFloat64(0, json.Number(s[start:p.pos]))
-			}
-			return &SyntaxError{Pos: p.pos, Src: p.src, Code: nativetypes.ERR_INVALID_NUMBER_FMT, Msg: "invalid exponent"}
-		}
-		if p.pos < len(s) && (s[p.pos] == '+' || s[p.pos] == '-') {
-			p.pos++
-		}
-		if p.pos >= len(s) || s[p.pos] < '0' || s[p.pos] > '9' {
-			return &SyntaxError{Pos: p.pos, Src: p.src, Code: nativetypes.ERR_INVALID_NUMBER_FMT, Msg: "invalid exponent"}
-		}
-		for p.pos < len(s) && s[p.pos] >= '0' && s[p.pos] <= '9' {
-			p.pos++
-		}
-	}
-	numStr := s[start:p.pos]
 	num := json.Number(numStr)
 	if p.onlyNumber {
 		return visitor.OnFloat64(0, num)
@@ -268,7 +227,17 @@ func (p *preorderParser) parseNumber(visitor Visitor) error {
 func (p *preorderParser) parseString() (string, error) {
 	// Assumes p.src[p.pos] == '"'.
 	p.pos++
+	start := p.pos
+	for p.pos < len(p.src) && p.src[p.pos] != '\\' {
+		if p.src[p.pos] == '"' {
+			result := p.src[start:p.pos]
+			p.pos++
+			return result, nil
+		}
+		p.pos++
+	}
 	var b strings.Builder
+	b.WriteString(p.src[start:p.pos])
 	s := p.src
 	for p.pos < len(s) {
 		c := s[p.pos]
@@ -473,68 +442,4 @@ func (p *preorderParser) skipWhitespace() {
 			return
 		}
 	}
-}
-
-// guessContainerSize returns a rough estimate of the number of children
-// of the container starting at p.pos-1's body. It scans the top level of
-// the container counting top-level commas. The estimate is used only as
-// a hint for visitors that pre-allocate capacity.
-func (p *preorderParser) guessContainerSize() int {
-	saved := p.pos
-	depth := 1
-	inString := false
-	count := 0
-	body := p.src[p.pos:]
-	i := 0
-	for i < len(body) && depth > 0 {
-		c := body[i]
-		if inString {
-			if c == '\\' {
-				i += 2
-				continue
-			}
-			if c == '"' {
-				inString = false
-			}
-			i++
-			continue
-		}
-		switch c {
-		case '"':
-			inString = true
-		case '{', '[':
-			depth++
-		case '}', ']':
-			depth--
-			if depth == 0 {
-				break
-			}
-		case ',':
-			if depth == 1 {
-				count++
-			}
-		}
-		i++
-	}
-	if i == 0 && depth > 0 {
-		// Empty container.
-		p.pos = saved
-		return 0
-	}
-	// Non-empty containers have count+1 top-level elements.
-	if i > 0 && depth == 0 && (count > 0 || i > 0) {
-		// Detect empty container.
-		// Find first non-whitespace byte in body.
-		j := 0
-		for j < len(body) && (body[j] == ' ' || body[j] == '\t' || body[j] == '\n' || body[j] == '\r') {
-			j++
-		}
-		if j < len(body) && (body[j] == '}' || body[j] == ']') {
-			return 0
-		}
-		p.pos = saved
-		return count + 1
-	}
-	p.pos = saved
-	return 0
 }

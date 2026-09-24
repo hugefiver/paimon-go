@@ -39,6 +39,11 @@ func GetWithOptions(_ []byte, _ ast.SearchOptions, _ ...interface{}) (ast.Node, 
 	return ast.Node{}, ErrJSONv2ExperimentDisabled
 }
 
+// GetStringWithOptions is unavailable when the JSON v2 backend is disabled.
+func GetStringWithOptions(_ string, _ ast.SearchOptions, _ ...interface{}) (ast.Node, error) {
+	return ast.Node{}, ErrJSONv2ExperimentDisabled
+}
+
 // disabledAPI implements API by failing every operation.
 type disabledAPI struct{ cfg Config }
 

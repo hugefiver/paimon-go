@@ -183,11 +183,11 @@ func TestJSONV2RootNumberModesAndAPIKind(t *testing.T) {
 	}
 
 	var numberOut map[string]interface{}
-	if err := (Config{UseNumber: true, UseInt64: true}).Froze().Unmarshal([]byte(`{"n":1}`), &numberOut); err != nil {
-		t.Fatalf("UseNumber+UseInt64 Unmarshal error = %v", err)
+	if err := (Config{UseNumber: true}).Froze().Unmarshal([]byte(`{"n":1}`), &numberOut); err != nil {
+		t.Fatalf("UseNumber Unmarshal error = %v", err)
 	}
 	if got, ok := numberOut["n"].(json.Number); !ok || got.String() != "1" {
-		t.Fatalf("UseNumber+UseInt64 n = %v (%T), want json.Number(1)", numberOut["n"], numberOut["n"])
+		t.Fatalf("UseNumber n = %v (%T), want json.Number(1)", numberOut["n"], numberOut["n"])
 	}
 }
 

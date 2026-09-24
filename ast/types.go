@@ -2,10 +2,8 @@
 //
 // The mutable JSON tree, parser, searcher, visitor, and iterator types
 // provided here are source-compatible with github.com/bytedance/sonic/ast
-// for the Sonic 1.15.* line. The implementation uses
-// github.com/valyala/fastjson to parse raw JSON and then deep-copies the
-// result into Node values so fastjson parser lifetimes never leak through
-// the public AST API.
+// for the Sonic 1.15.* line. Raw containers expose stable child slots lazily;
+// parsing and validation do not borrow memory from reusable parser arenas.
 package ast
 
 import (
@@ -49,9 +47,8 @@ var VisitOPSkip = errors.New("skip children")
 
 // Node is a mutable JSON value. The zero value is an absent node.
 //
-// All exported accessors are safe to call on a zero-value Node; methods
-// that require a present value return ErrNotExist (or a wrapped error)
-// when the node is absent.
+// All exported accessors are safe to call on a zero-value Node. Unsupported
+// conversions return ErrUnsupportType; Raw and MarshalJSON return ErrNotExist.
 type Node struct {
 	typ    int
 	exists bool
@@ -60,21 +57,22 @@ type Node struct {
 	// until Load / LoadAll is called.
 	loaded bool
 	boolv  bool
-	// mu is allocated only for valid lazy nodes constructed with concurrent
-	// reads enabled. It is immutable after construction and protects the
-	// one-time raw-to-loaded materialization.
+	// mu is enabled by concurrent-read constructors or an explicit Load.
+	// It remains stable during reads and protects lazy materialization.
 	mu  *sync.RWMutex
 	raw string
 	str string
 	num json.Number
-	arr []Node
-	obj []Pair
+	arr []*Node
+	obj []*Pair
 	any interface{}
 	err error
+	// lazyPos is owned by each Node copy; raw holds the immutable source.
+	lazyPos int
 }
 
 // Pair is an object key/value pair. Object nodes store their entries as
-// a []Pair so that insertion order is preserved.
+// a pointer slice so insertion order and child addresses survive mutations.
 type Pair struct {
 	Key   string
 	Value Node
@@ -151,7 +149,7 @@ func (e SyntaxError) description() string {
 	if e.Src == "" {
 		return fmt.Sprintf("no sources available, the input json is empty: %#v", e)
 	}
-	return errorcontext.SourceDescription(e.Src, e.Pos, e.Message())
+	return errorcontext.ASTSourceDescription(e.Src, e.Pos, e.Message())
 }
 
 // VisitorOptions tunes Preorder traversal behavior.

@@ -198,9 +198,9 @@ func TestUseInt64ConvertsNestedInterface(t *testing.T) {
 	if v, ok := out["n"].(int64); !ok || v != 42 {
 		t.Fatalf("n = %v (%T), want int64 42", out["n"], out["n"])
 	}
-	// 3.14 is not an integer; it should remain a json.Number.
-	if _, ok := out["f"].(json.Number); !ok {
-		t.Fatalf("f type = %T, want json.Number", out["f"])
+	// Fractions use float64 in native Sonic UseInt64 mode.
+	if _, ok := out["f"].(float64); !ok {
+		t.Fatalf("f type = %T, want float64", out["f"])
 	}
 }
 
@@ -244,16 +244,16 @@ func TestUseInt64ConvertsDeeplyNested(t *testing.T) {
 	}
 }
 
-func TestUseInt64LeavesLargeNumbersAsNumber(t *testing.T) {
-	// 99999999999999999999 exceeds int64 range; it stays a json.Number.
+func TestUseInt64ConvertsLargeNumbersToFloat(t *testing.T) {
+	// 99999999999999999999 exceeds int64 range and uses float64.
 	d := NewDecoder(`{"n":99999999999999999999}`)
 	d.UseInt64()
 	var out map[string]interface{}
 	if err := d.Decode(&out); err != nil {
 		t.Fatalf("Decode error = %v", err)
 	}
-	if _, ok := out["n"].(json.Number); !ok {
-		t.Fatalf("n type = %T, want json.Number (overflow)", out["n"])
+	if _, ok := out["n"].(float64); !ok {
+		t.Fatalf("n type = %T, want float64 (overflow)", out["n"])
 	}
 }
 
@@ -375,8 +375,8 @@ func TestPosAdvancesOnDecode(t *testing.T) {
 	if second["b"] != 2 {
 		t.Fatalf("second = %v", second)
 	}
-	if err := d.Decode(&second); err != io.EOF {
-		t.Fatalf("third Decode error = %v, want io.EOF", err)
+	if err, ok := d.Decode(&second).(SyntaxError); !ok || err.Code != nativetypes.ERR_EOF {
+		t.Fatalf("third Decode error = %v, want Sonic EOF SyntaxError", err)
 	}
 }
 
@@ -801,12 +801,13 @@ func TestMismatchTypeErrorMethods(t *testing.T) {
 
 func TestMismatchTypeErrorDescriptionMatchesSonic(t *testing.T) {
 	mismatch := MismatchTypeError{Pos: 5, Src: `{"n":1}`, Type: reflect.TypeOf("")}
-	const want = "Mismatch type string with value number at index 5: mismatch\n\n\t{\"n\":1}\n\t.....^.\n"
+	const want = "Mismatch type string with value number at index 5: mismatched type with value\n\n\t{\"n\":1}\n\t.....^.\n"
 	if got := mismatch.Description(); got != want {
 		t.Fatalf("MismatchTypeError.Description() = %q, want %q", got, want)
 	}
-	if got := mismatch.Error(); got != want {
-		t.Fatalf("MismatchTypeError.Error() = %q, want %q", got, want)
+	wantError := "Mismatch type string with value number " + strconv.Quote(strings.TrimPrefix(want, "Mismatch type string with value number "))
+	if got := mismatch.Error(); got != wantError {
+		t.Fatalf("MismatchTypeError.Error() = %q, want %q", got, wantError)
 	}
 
 	for _, tt := range []struct {
@@ -824,7 +825,7 @@ func TestMismatchTypeErrorDescriptionMatchesSonic(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			err := MismatchTypeError{Src: tt.src, Value: tt.value, Type: reflect.TypeOf(0)}
-			want := fmt.Sprintf("Mismatch type int with value %s at index 0: mismatch\n\n\t%s\n\t^%s\n", tt.want, tt.src, strings.Repeat(".", len(tt.src)-1))
+			want := fmt.Sprintf("Mismatch type int with value %s at index 0: mismatched type with value\n\n\t%s\n\t^%s\n", tt.want, tt.src, strings.Repeat(".", len(tt.src)-1))
 			if got := err.Description(); got != want {
 				t.Fatalf("MismatchTypeError.Description() = %q, want %q", got, want)
 			}
@@ -832,7 +833,7 @@ func TestMismatchTypeErrorDescriptionMatchesSonic(t *testing.T) {
 	}
 
 	nilType := MismatchTypeError{Src: "1"}
-	const wantNilType = "Mismatch type <nil> with value number at index 0: mismatch\n\n\t1\n\t^\n"
+	const wantNilType = "Mismatch type <nil> with value number at index 0: mismatched type with value\n\n\t1\n\t^\n"
 	if got := nilType.Description(); got != wantNilType {
 		t.Fatalf("nil-type MismatchTypeError.Description() = %q, want %q", got, wantNilType)
 	}

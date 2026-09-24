@@ -22,10 +22,12 @@ import (
 	"bytes"
 	"encoding/json"
 	"io"
+	"os"
 	"reflect"
-	"strconv"
 
+	"github.com/bytedance/sonic/decoder"
 	"github.com/bytedance/sonic/internal/backend"
+	nativetypes "github.com/bytedance/sonic/internal/native/types"
 	"github.com/bytedance/sonic/internal/stdjsoncompat"
 	"github.com/bytedance/sonic/option"
 )
@@ -124,12 +126,7 @@ func EncodeInto(buf *[]byte, val interface{}, opts Options) error {
 	if buf == nil {
 		panic("user-supplied buffer buf is nil")
 	}
-	out, err := Encode(val, opts)
-	if err != nil {
-		return err
-	}
-	*buf = append(*buf, out...)
-	return nil
+	return stdjsoncompat.Append(buf, val, optionToConfig(opts))
 }
 
 // HTMLEscape appends to dst the JSON-escaped form of src, replacing <,
@@ -143,22 +140,331 @@ func HTMLEscape(dst []byte, src []byte) []byte {
 }
 
 // Quote returns a double-quoted JSON string literal form of s. It is a
-// thin wrapper over strconv.Quote; callers that need HTML-escaped
-// output should compose HTMLEscape on top.
+// UTF-8 bytes are retained, and control characters use JSON escapes.
 func Quote(s string) string {
-	return strconv.Quote(s)
+	return quoteJSON(s)
 }
 
-// Valid reports whether data is a single well-formed JSON value. It
-// also returns the offset of the first non-whitespace byte so callers
-// can locate the start of the JSON value. When the data is invalid but
-// contains only whitespace (or is empty), start is len(data).
+// Valid checks Sonic's structural JSON grammar and returns the first value's
+// start on success, or the offending cursor on failure. Like native Sonic,
+// string escape contents and UTF-8 are not validated by this entry point.
 func Valid(data []byte) (ok bool, start int) {
-	start = firstNonSpaceOffset(data)
-	if !json.Valid(data) {
-		return false, start
+	if len(data) == 0 {
+		return false, -1
+	}
+	start, end := decoder.Skip(data)
+	if start < 0 {
+		if start == -int(nativetypes.ERR_RECURSE_EXCEED_MAX) {
+			return false, end - 1
+		}
+		return false, validationCursor(data, end-1)
+	}
+	for i := end; i < len(data); i++ {
+		switch data[i] {
+		case ' ', '\t', '\n', '\r':
+		default:
+			// Skip can stop before an invalid continuation of a number;
+			// ValidateOne consumes the entire numeric run first.
+			if cursor := validationCursor(data, i); cursor >= 0 {
+				return false, cursor
+			}
+			return false, i
+		}
 	}
 	return true, start
+}
+
+// validationCursor replays the token boundaries of native ValidateOne only
+// when Skip's cursor is not sufficient. Structural/EOF errors retain Skip's
+// diagnostic cursor; literal and numeric errors use ValidateOne's cursor.
+func validationCursor(data []byte, fallback int) int {
+	s := validationScanner{data: data, fallback: fallback, cursor: -1}
+	if !s.value(0) {
+		return s.cursor
+	}
+	s.space()
+	if s.pos < len(data) {
+		return s.pos
+	}
+	return -1
+}
+
+type validationScanner struct {
+	data     []byte
+	pos      int
+	fallback int
+	cursor   int
+}
+
+// Match native Sonic's startup SIMD selection for the supported mode overrides.
+var validationAVX2 = os.Getenv("SONIC_MODE") != "noavx" && os.Getenv("SONIC_MODE") != "noavx2"
+
+func (s *validationScanner) space() {
+	for s.pos < len(s.data) {
+		switch s.data[s.pos] {
+		case ' ', '\t', '\n', '\r':
+			s.pos++
+		default:
+			return
+		}
+	}
+}
+
+func (s *validationScanner) value(depth int) bool {
+	s.space()
+	if s.pos >= len(s.data) || depth > 4096 {
+		s.cursor = s.fallback
+		return false
+	}
+	switch s.data[s.pos] {
+	case '[':
+		s.pos++
+		s.space()
+		if s.pos < len(s.data) && s.data[s.pos] == ']' {
+			s.pos++
+			return true
+		}
+		for {
+			if !s.value(depth + 1) {
+				return false
+			}
+			s.space()
+			if s.pos >= len(s.data) || s.data[s.pos] == ']' {
+				break
+			}
+			if s.data[s.pos] != ',' {
+				break
+			}
+			s.pos++
+		}
+		if s.pos < len(s.data) && s.data[s.pos] == ']' {
+			s.pos++
+			return true
+		}
+	case '{':
+		s.pos++
+		s.space()
+		if s.pos < len(s.data) && s.data[s.pos] == '}' {
+			s.pos++
+			return true
+		}
+		for s.pos < len(s.data) && s.data[s.pos] == '"' {
+			if !s.string() {
+				break
+			}
+			s.space()
+			if s.pos >= len(s.data) || s.data[s.pos] != ':' {
+				s.cursor = s.fallback
+				return false
+			}
+			s.pos++
+			if !s.value(depth + 1) {
+				return false
+			}
+			s.space()
+			if s.pos >= len(s.data) || s.data[s.pos] != ',' {
+				break
+			}
+			s.pos++
+			s.space()
+			if s.pos >= len(s.data) || s.data[s.pos] != '"' {
+				s.cursor = s.fallback
+				return false
+			}
+		}
+		if s.pos < len(s.data) && s.data[s.pos] == '}' {
+			s.pos++
+			return true
+		}
+	case '"':
+		if s.string() {
+			return true
+		}
+	case 't', 'f', 'n':
+		return s.literal()
+	case '-', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9':
+		return s.number()
+	}
+	s.cursor = s.fallback
+	return false
+}
+
+func (s *validationScanner) string() bool {
+	s.pos++
+	for s.pos < len(s.data) {
+		switch s.data[s.pos] {
+		case '\\':
+			s.pos += 2
+		case '"':
+			s.pos++
+			return true
+		default:
+			s.pos++
+		}
+	}
+	return false
+}
+
+func (s *validationScanner) literal() bool {
+	start := s.pos
+	literal := "true"
+	switch s.data[start] {
+	case 'f':
+		literal = "false"
+	case 'n':
+		literal = "null"
+	}
+	// The native four-byte literal comparison checks the remaining *whole*
+	// input, not just the token. Its 'f' comparison has a size_t underflow
+	// for inputs shorter than four bytes, so those take the mismatch path.
+	if len(s.data) >= len(literal)-1 && start+len(literal) > len(s.data) {
+		s.cursor = len(s.data) - 1
+		return false
+	}
+	for i := 0; i < len(literal); i++ {
+		at := start + i
+		if at >= len(s.data) || s.data[at] != literal[i] {
+			s.cursor = at - 1
+			return false
+		}
+	}
+	s.pos += len(literal)
+	return true
+}
+
+func (s *validationScanner) number() bool {
+	start := s.pos
+	negative := s.data[s.pos] == '-'
+	if negative {
+		s.pos++
+		if s.pos >= len(s.data) || s.data[s.pos] < '0' || s.data[s.pos] > '9' {
+			s.cursor = s.fallback
+			return false
+		}
+	}
+	base := s.pos
+	if s.data[base] == '0' && (base+1 == len(s.data) || (s.data[base+1] != '.' && s.data[base+1] != 'e' && s.data[base+1] != 'E')) {
+		s.pos++
+		return true
+	}
+	dot, exponent, sign := -1, -1, -1
+	// Native ValidateOne scans complete 32-byte AVX2 blocks, then 16-byte
+	// SSE blocks, before its scalar tail. Within each block it checks
+	// repeated dots, then exponents, then signs (rather than the earliest
+	// duplicate of any kind).
+	for len(s.data)-s.pos >= 16 {
+		blockSize := 16
+		if validationAVX2 && len(s.data)-s.pos >= 32 {
+			blockSize = 32
+		}
+		block := s.pos
+		first := [3]int{-1, -1, -1}
+		second := [3]int{-1, -1, -1}
+		n := 0
+		for n < blockSize {
+			c := s.data[block+n]
+			kind := -1
+			switch {
+			case c >= '0' && c <= '9':
+			case c == '.':
+				kind = 0
+			case c == 'e' || c == 'E':
+				kind = 1
+			case c == '+' || c == '-':
+				kind = 2
+			default:
+				goto checkBlock
+			}
+			if kind >= 0 {
+				if first[kind] < 0 {
+					first[kind] = block + n - base
+				} else if second[kind] < 0 {
+					second[kind] = block + n - base
+				}
+			}
+			n++
+		}
+	checkBlock:
+		for kind := range second {
+			if second[kind] >= 0 {
+				s.numberError(start, negative, second[kind]+1)
+				return false
+			}
+		}
+		for kind, previous := range [...]int{dot, exponent, sign} {
+			if previous >= 0 && first[kind] >= 0 {
+				s.numberError(start, negative, first[kind]+1)
+				return false
+			}
+		}
+		if first[0] >= 0 {
+			dot = first[0]
+		}
+		if first[1] >= 0 {
+			exponent = first[1]
+		}
+		if first[2] >= 0 {
+			sign = first[2]
+		}
+		s.pos += n
+		if n != blockSize {
+			goto checkNumber
+		}
+	}
+	for s.pos < len(s.data) {
+		c := s.data[s.pos]
+		switch {
+		case c >= '0' && c <= '9':
+		case c == '.':
+			if dot >= 0 {
+				s.numberError(start, negative, s.pos-base+1)
+				return false
+			}
+			dot = s.pos - base
+		case c == 'e' || c == 'E':
+			if exponent >= 0 {
+				s.numberError(start, negative, s.pos-base+1)
+				return false
+			}
+			exponent = s.pos - base
+		case c == '+' || c == '-':
+			if sign >= 0 {
+				s.numberError(start, negative, s.pos-base+1)
+				return false
+			}
+			sign = s.pos - base
+		default:
+			goto checkNumber
+		}
+		s.pos++
+	}
+checkNumber:
+	n := s.pos - base
+	bad := 0
+	switch {
+	case dot == 0 || exponent == 0 || sign == 0:
+		bad = 1
+	case dot == n-1 || exponent == n-1 || sign == n-1:
+		bad = n
+	case sign >= 0 && exponent != sign-1:
+		bad = sign + 1
+	case dot >= 0 && exponent >= 0 && dot > exponent-1:
+		bad = dot + 1
+	case dot >= 0 && exponent >= 0 && dot == exponent-1:
+		bad = exponent + 1
+	}
+	if bad != 0 {
+		s.numberError(start, negative, bad)
+		return false
+	}
+	return true
+}
+
+func (s *validationScanner) numberError(start int, negative bool, consumed int) {
+	s.cursor = start + consumed - 2
+	if negative {
+		s.cursor++
+	}
 }
 
 // firstNonSpaceOffset returns the index of the first byte in data that
@@ -205,8 +511,8 @@ type Encoder struct {
 }
 
 // Encode marshals v under the encoder's current configuration. When prefix
-// or indent is non-empty the output is indented and terminated with a newline;
-// otherwise it is compact.
+// or indent is non-empty the output is indented. Encoder.Encode never adds a
+// trailing newline; StreamEncoder controls record separators separately.
 func (e *Encoder) Encode(v interface{}) ([]byte, error) {
 	if e.prefix == "" && e.indent == "" {
 		return Encode(v, e.Opts)
@@ -215,7 +521,7 @@ func (e *Encoder) Encode(v interface{}) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	return append(out, '\n'), nil
+	return out, nil
 }
 
 // SetCompactMarshaler toggles the CompactMarshaler option bit.
@@ -243,7 +549,8 @@ func (e *Encoder) SetIndent(prefix, indent string) {
 	e.indent = indent
 }
 
-// SetNoEncoderNewline toggles the NoEncoderNewline option bit. Encoder.Encode emits a trailing newline only for indented output; StreamEncoder applies the option to suppress its final newline.
+// SetNoEncoderNewline toggles the StreamEncoder record separator. It has no
+// effect on Encoder.Encode, which never appends a newline.
 func (e *Encoder) SetNoEncoderNewline(on bool) {
 	if on {
 		e.Opts |= NoEncoderNewline
@@ -295,7 +602,9 @@ type StreamEncoder struct {
 	Encoder
 	// w is the destination writer. It is set at construction time and
 	// is not replaced.
-	w io.Writer
+	w        io.Writer
+	stream   backend.StreamEncoder
+	lastOpts Options
 }
 
 // NewStreamEncoder constructs a StreamEncoder writing to w. The
@@ -315,38 +624,11 @@ func NewStreamEncoder(w io.Writer) *StreamEncoder {
 // Opts, matching the default behavior of encoding/json's
 // json.Encoder.Encode and Sonic's encoder.StreamEncoder.
 func (e *StreamEncoder) Encode(val interface{}) error {
-	out, err := e.Encoder.Encode(val)
-	if err != nil {
-		return err
+	if e.stream == nil || e.lastOpts != e.Opts {
+		e.stream = stdjsoncompat.NewEncoder(e.w, optionToConfig(e.Opts))
+		e.lastOpts = e.Opts
 	}
-	if e.Opts&NoEncoderNewline != 0 && len(out) > 0 && out[len(out)-1] == '\n' {
-		out = out[:len(out)-1]
-	}
-	for offset := 0; offset < len(out); {
-		n, err := e.w.Write(out[offset:])
-		if err != nil {
-			return err
-		}
-		if n <= 0 || n > len(out)-offset {
-			return io.ErrShortWrite
-		}
-		offset += n
-	}
-	if e.Opts&NoEncoderNewline == 0 && (len(out) == 0 || out[len(out)-1] != '\n') {
-		for offset := 0; offset < len(newlineBytes); {
-			n, err := e.w.Write(newlineBytes[offset:])
-			if err != nil {
-				return err
-			}
-			if n <= 0 || n > len(newlineBytes)-offset {
-				return io.ErrShortWrite
-			}
-			offset += n
-		}
-	}
-	return nil
+	e.stream.SetEscapeHTML(e.Opts&EscapeHTML != 0)
+	e.stream.SetIndent(e.prefix, e.indent)
+	return e.stream.Encode(val)
 }
-
-// newlineBytes is the single-byte newline appended by StreamEncoder
-// when NoEncoderNewline is not set.
-var newlineBytes = []byte{'\n'}

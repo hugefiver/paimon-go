@@ -28,7 +28,7 @@ func TestDefaultValidOracle(t *testing.T) {
 		{name: "trailing data", data: []byte(`{"a":1}extra`), want: false},
 		{name: "leading zero", data: []byte(`{"a":01}`), want: false},
 		{name: "malformed exponent", data: []byte(`{"a":1e}`), want: false},
-		{name: "unknown escape", data: []byte(`{"a":"\q"}`), want: false},
+		{name: "unknown escape", data: []byte(`{"a":"\q"}`), want: true},
 		{name: "truncated escape", data: []byte(`{"a":"\`), want: false},
 		{name: "control outside string", data: []byte{'{', 0x1f, '"', 'a', '"', ':', '1', '}'}, want: false},
 		{name: "unterminated string", data: []byte(`{"a":"unterminated`), want: false},
@@ -47,7 +47,6 @@ func TestDefaultValidOracle(t *testing.T) {
 }
 
 func defaultValidOracle(data []byte) bool {
-	const hex = "0123456789abcdef"
 
 	normalized := make([]byte, 0, len(data))
 	inString := false
@@ -65,24 +64,19 @@ func defaultValidOracle(data []byte) bool {
 		}
 
 		if escaped {
-			normalized = append(normalized, b)
+			normalized = append(normalized, 'x')
 			escaped = false
 			continue
 		}
 
 		switch b {
 		case '\\':
-			normalized = append(normalized, b)
 			escaped = true
 		case '"':
 			normalized = append(normalized, b)
 			inString = false
 		default:
-			if b < 0x20 {
-				normalized = append(normalized, '\\', 'u', '0', '0', hex[b>>4], hex[b&0x0f])
-				continue
-			}
-			normalized = append(normalized, b)
+			normalized = append(normalized, 'x')
 		}
 	}
 

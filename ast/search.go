@@ -116,9 +116,6 @@ const (
 )
 
 func getPathRaw(src string, path []interface{}, validate bool) (string, rawPathStatus) {
-	if !canScanASCII(src) {
-		return "", rawPathNoFast
-	}
 	start := skipJSONSpaceString(src, 0)
 	if start == len(src) {
 		return "", rawPathInvalid
@@ -176,7 +173,7 @@ func searchValueRaw(src string, start int, validate bool) (string, rawPathStatus
 		end int
 		ok  bool
 	)
-	if src[start] == '{' || src[start] == '[' {
+	if !validate && (src[start] == '{' || src[start] == '[') {
 		end, ok = scanContainerEnd(src, start)
 	} else {
 		end, ok = scanValueEndString(src, start, 0)
@@ -185,23 +182,6 @@ func searchValueRaw(src string, start int, validate bool) (string, rawPathStatus
 		return "", rawPathInvalid
 	}
 	raw := src[start:end]
-	// Structurally closed string tokens preserve Sonic's raw compatibility,
-	// including unknown escapes. Validation still checks other non-string syntax.
-	if validate && raw[0] != '"' {
-		bareExponent := isBareExponent(raw) && validScannedRootRaw(src, start, end)
-		if !validRootRaw(raw) && !bareExponent {
-			return "", rawPathInvalid
-		}
-		if _, code := parseRawToNodeLocal(raw); code != 0 && code != nativetypes.ERR_INVALID_ESCAPE && !bareExponent {
-			return "", rawPathInvalid
-		}
-	}
-	if !validate && (raw[0] == '{' || raw[0] == '[') {
-		// Preserve loose containers without accepting malformed number tokens.
-		if _, code := parseRawToNodeLocal(raw); code == nativetypes.ERR_INVALID_NUMBER_FMT {
-			return "", rawPathInvalid
-		}
-	}
 	return raw, rawPathFound
 }
 
@@ -226,10 +206,6 @@ func newUncheckedRaw(raw string, opts SearchOptions) Node {
 		node.mu = &sync.RWMutex{}
 	}
 	return node
-}
-
-func canScanASCII(src string) bool {
-	return true
 }
 
 func findObjectValueStartString(src string, start int, key string) (int, rawPathStatus) {
@@ -438,8 +414,8 @@ func scanNumberEndString(src string, start int) (int, bool) {
 	}
 	if src[i] == '0' {
 		i++
-		for i < len(src) && src[i] >= '0' && src[i] <= '9' {
-			i++
+		if i == len(src) || (src[i] != '.' && src[i] != 'e' && src[i] != 'E') {
+			return i, true
 		}
 	} else if src[i] >= '1' && src[i] <= '9' {
 		for i < len(src) && src[i] >= '0' && src[i] <= '9' {
@@ -459,9 +435,6 @@ func scanNumberEndString(src string, start int) (int, bool) {
 	}
 	if i < len(src) && (src[i] == 'e' || src[i] == 'E') {
 		i++
-		if i < len(src) && isJSONNumberTerminator(src[i]) {
-			return i, true
-		}
 		if i < len(src) && (src[i] == '+' || src[i] == '-') {
 			i++
 		}
@@ -472,7 +445,14 @@ func scanNumberEndString(src string, start int) (int, bool) {
 			i++
 		}
 	}
+	if i < len(src) && isNumberContinuation(src[i]) {
+		return 0, false
+	}
 	return i, true
+}
+
+func isNumberContinuation(c byte) bool {
+	return c == '+' || c == '-' || c == '.' || c == 'e' || c == 'E'
 }
 
 func skipJSONSpaceString(src string, i int) int {
@@ -495,56 +475,6 @@ func jsonKeyMatchesString(raw string, key string) (bool, bool) {
 		return false, false
 	}
 	return decoded == key, true
-}
-
-func validRootRaw(raw string) bool {
-	start := skipJSONSpaceString(raw, 0)
-	if start == len(raw) {
-		return false
-	}
-	end, ok := scanValueEndString(raw, start, 0)
-	if !ok {
-		return false
-	}
-	return skipJSONSpaceString(raw, end) == len(raw)
-}
-
-// validScannedRootRaw preserves the source delimiter that made a bare
-// exponent scannable. Once sliced, that context is unavailable to
-// validRootRaw, so accept only that exact upstream-compatible exception.
-func validScannedRootRaw(src string, start int, end int) bool {
-	raw := src[start:end]
-	if validRootRaw(raw) {
-		return true
-	}
-	if len(raw) == 0 || end == len(src) || !isJSONNumberTerminator(src[end]) {
-		return false
-	}
-	last := raw[len(raw)-1]
-	if last != 'e' && last != 'E' {
-		return false
-	}
-	return validRootRaw(raw[:len(raw)-1])
-}
-
-func scanFirstValueEnd(src string, start int) (int, bool) {
-	switch src[start] {
-	case '{', '[':
-		return scanContainerEnd(src, start)
-	case '"':
-		return scanStringEnd(src, start)
-	case 't':
-		return scanLiteralString(src, start, "true")
-	case 'f':
-		return scanLiteralString(src, start, "false")
-	case 'n':
-		return scanLiteralString(src, start, "null")
-	default:
-		if src[start] == '-' || (src[start] >= '0' && src[start] <= '9') {
-			return scanNumberEndString(src, start)
-		}
-		return 0, false
-	}
 }
 
 func scanContainerEnd(src string, start int) (int, bool) {
@@ -614,10 +544,6 @@ func scanStringEnd(src string, start int) (int, bool) {
 
 func isJSONSpace(c byte) bool {
 	return c == ' ' || c == '\n' || c == '\r' || c == '\t'
-}
-
-func isJSONNumberTerminator(c byte) bool {
-	return isJSONSpace(c) || c == ',' || c == ']' || c == '}'
 }
 
 // Loads parses src as a single JSON value and returns it as an

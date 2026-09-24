@@ -498,21 +498,21 @@ func (v *capacityVisitor) OnArrayBegin(capacity int) error {
 }
 func (*capacityVisitor) OnArrayEnd() error { return nil }
 
-func TestPreorderKeepsEstimatedContainerCapacity(t *testing.T) {
+func TestPreorderNativeContainerCapacity(t *testing.T) {
 	visitor := &capacityVisitor{}
 	if err := Preorder(`{}`, visitor, nil); err != nil {
 		t.Fatalf("Preorder({}) error = %v", err)
 	}
-	if visitor.objectCapacity != 0 {
-		t.Fatalf("object capacity = %d, want 0", visitor.objectCapacity)
+	if visitor.objectCapacity != 16 {
+		t.Fatalf("object capacity = %d, want 16", visitor.objectCapacity)
 	}
 
 	visitor = &capacityVisitor{}
 	if err := Preorder(`[1]`, visitor, nil); err != nil {
 		t.Fatalf("Preorder([1]) error = %v", err)
 	}
-	if visitor.arrayCapacity != 1 {
-		t.Fatalf("array capacity = %d, want 1", visitor.arrayCapacity)
+	if visitor.arrayCapacity != 16 {
+		t.Fatalf("array capacity = %d, want 16", visitor.arrayCapacity)
 	}
 }
 

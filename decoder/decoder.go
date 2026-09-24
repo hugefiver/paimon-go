@@ -4,15 +4,11 @@
 // StreamDecoder for io.Reader inputs, and the Pretouch/PretouchMany
 // hooks used by callers that warm Sonic's JIT cache.
 //
-// The implementation in this phase is a thin façade over the standard
-// library's encoding/json package. It honors the subset of Options that
-// encoding/json can control directly:
+// Standard-library decoding handles ordinary typed values. Interface numbers
+// in UseInt64 mode are decoded directly from the input:
 //
 //   - OptionUseNumber           -> json.Decoder.UseNumber
-//   - OptionUseInt64            -> decode with UseNumber, then convert
-//     integer-looking json.Number values
-//     to int64 in nested interface/map/slice
-//     targets
+//   - OptionUseInt64            -> int64 integer tokens, otherwise float64
 //   - OptionDisableUnknown      -> json.Decoder.DisallowUnknownFields
 //
 // Options that encoding/json cannot enforce (OptionUseUnicodeErrors,
@@ -25,8 +21,8 @@
 package decoder
 
 import (
+	"bytes"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"reflect"
@@ -120,7 +116,13 @@ type MismatchTypeError struct {
 	Field  string
 }
 
-func (e MismatchTypeError) Error() string { return e.Description() }
+func (e MismatchTypeError) Error() string {
+	typeName := "<nil>"
+	if e.Type != nil {
+		typeName = e.Type.String()
+	}
+	return "Mismatch type " + typeName + " with value " + e.valueKind() + " " + strconv.Quote(errorcontext.SourceDescription(e.Src, e.Pos, nativetypes.ERR_MISMATCH.Message()))
+}
 
 func (e MismatchTypeError) Description() string {
 	typeName := "<nil>"
@@ -546,8 +548,12 @@ type Decoder struct {
 	// useInt64 and useNumber are derived from opts at SetOptions time
 	// but also toggled by the Use* convenience methods so the bitmask
 	// and the fast-path flags stay in sync.
-	useInt64  bool
-	useNumber bool
+	useInt64   bool
+	useNumber  bool
+	dec        *json.Decoder
+	base       int
+	targetType reflect.Type
+	retainsRaw bool
 }
 
 // NewDecoder returns a Decoder that reads from s. The returned Decoder
@@ -562,50 +568,53 @@ func NewDecoder(s string) *Decoder {
 //
 // The position cursor is advanced past the decoded value, so successive
 // calls to Decode return successive values from the source. When the
-// source is exhausted, Decode returns io.EOF.
+// source is exhausted, Decode returns a Sonic SyntaxError with ERR_EOF.
 //
 // Options that affect decoding (OptionUseNumber, OptionUseInt64,
 // OptionDisableUnknown) are honored. OptionUseInt64 only converts
 // numeric values for interface{}, map, and slice targets; struct
 // targets are decoded by encoding/json with their declared field types.
 func (d *Decoder) Decode(val interface{}) error {
-	// Skip any whitespace between values.
-	for d.pos < len(d.src) && isSpace(byteForIndex(d.src, d.pos)) {
-		d.pos++
-	}
 	if d.pos >= len(d.src) {
-		return io.EOF
+		return SyntaxError{Src: d.src, Pos: d.pos, Code: nativetypes.ERR_EOF}
 	}
-
-	dec := json.NewDecoder(strings.NewReader(d.src[d.pos:]))
-	if d.useNumber || d.useInt64 {
-		dec.UseNumber()
+	if d.dec == nil {
+		d.base = d.pos
+		d.dec = json.NewDecoder(strings.NewReader(d.src[d.pos:]))
+		if d.useNumber {
+			d.dec.UseNumber()
+		}
+		if d.disallowUnknown {
+			d.dec.DisallowUnknownFields()
+		}
 	}
-	if d.disallowUnknown {
-		dec.DisallowUnknownFields()
+	var err error
+	if target := reflect.TypeOf(val); target != d.targetType {
+		d.targetType = target
+		d.retainsRaw = jsonconv.RetainsRawInput(target)
 	}
-
-	if err := dec.Decode(val); err != nil {
-		return err
-	}
-
-	consumed := int(dec.InputOffset())
-	d.pos += consumed
-
 	if d.useInt64 {
-		jsonconv.ConvertNumbersToInt64(val)
+		var raw json.RawMessage
+		if err = d.dec.Decode(&raw); err == nil {
+			err = jsonconv.UnmarshalInt64(raw, val, d.disallowUnknown)
+		}
+	} else {
+		err = d.dec.Decode(val)
 	}
-	return nil
+	if consumed := d.base + int(d.dec.InputOffset()); consumed > d.pos {
+		d.pos = consumed
+	}
+	if d.retainsRaw {
+		d.dec = nil
+	}
+	if err == io.EOF {
+		d.pos = len(d.src)
+		return SyntaxError{Src: d.src, Pos: d.pos, Code: nativetypes.ERR_EOF}
+	}
+	return err
 }
 
-// byteForIndex returns the byte at index i in s. It is a helper so the
-// whitespace-skip loop can stay allocation-free.
-func byteForIndex(s string, i int) byte {
-	if i < len(s) {
-		return s[i]
-	}
-	return 0
-}
+func (d *Decoder) invalidateDecoder() { d.dec = nil }
 
 // CheckTrailings returns nil if only whitespace bytes remain in the
 // source string after the current position. It returns an error
@@ -614,7 +623,7 @@ func byteForIndex(s string, i int) byte {
 func (d *Decoder) CheckTrailings() error {
 	for i := d.pos; i < len(d.src); i++ {
 		if !isSpace(d.src[i]) {
-			return errTrailingBytes
+			return SyntaxError{Src: d.src, Pos: i, Code: nativetypes.ERR_INVALID_CHAR}
 		}
 	}
 	return nil
@@ -630,6 +639,7 @@ func (d *Decoder) Pos() int { return d.pos }
 func (d *Decoder) Reset(s string) {
 	d.src = s
 	d.pos = 0
+	d.dec = nil
 }
 
 // SetOptions replaces the Options bitmask. The convenience flags
@@ -640,6 +650,7 @@ func (d *Decoder) SetOptions(opts Options) {
 		panic("can't set OptionUseInt64 and OptionUseNumber both!")
 	}
 	d.opts = opts
+	d.invalidateDecoder()
 	d.useNumber = opts&OptionUseNumber != 0
 	d.useInt64 = opts&OptionUseInt64 != 0
 	d.disallowUnknown = opts&OptionDisableUnknown != 0
@@ -650,6 +661,7 @@ func (d *Decoder) SetOptions(opts Options) {
 // been called) and then recursively converted to int64 when the number
 // parses as an integer via strconv.ParseInt.
 func (d *Decoder) UseInt64() {
+	d.invalidateDecoder()
 	d.opts |= OptionUseInt64
 	d.opts &^= OptionUseNumber
 	d.useInt64 = true
@@ -659,6 +671,7 @@ func (d *Decoder) UseInt64() {
 // UseNumber enables json.Number decoding for interface/map/slice
 // targets, matching encoding/json.Decoder.UseNumber.
 func (d *Decoder) UseNumber() {
+	d.invalidateDecoder()
 	d.opts |= OptionUseNumber
 	d.opts &^= OptionUseInt64
 	d.useNumber = true
@@ -690,53 +703,159 @@ func (d *Decoder) CopyString() {
 // configures subsequent Decode calls to reject JSON object keys that do
 // not match any destination struct field.
 func (d *Decoder) DisallowUnknownFields() {
+	d.invalidateDecoder()
 	d.opts |= OptionDisableUnknown
 	d.disallowUnknown = true
 }
-
-// errTrailingBytes is returned by CheckTrailings when non-whitespace
-// bytes remain after the decoded value.
-var errTrailingBytes = errors.New("decoder: invalid trailing characters at the end")
 
 // ---------------------------------------------------------------------------
 // StreamDecoder
 // ---------------------------------------------------------------------------
 
-// StreamDecoder reads and decodes JSON values from an io.Reader. It
-// mirrors sonic.decoder.StreamDecoder from v1.15.2. The implementation
-// wraps encoding/json.Decoder directly; the option bitmask is not
-// applied because the streaming API in this phase exposes only the
-// Decode/Buffered/InputOffset/More methods.
+// StreamDecoder reads values from an io.Reader and exposes Decoder's options.
+// It reuses parsing buffers, preserves retained NoCopyRawMessage values, and
+// records terminal errors so later Decode calls cannot consume another value.
 type StreamDecoder struct {
-	dec *json.Decoder
+	Decoder
+	dec            *json.Decoder
+	input          streamInput
+	offset         int64
+	configured     Options
+	terminal       error
+	terminalOffset int64
+	detach         bool
 }
 
-// NewStreamDecoder returns a StreamDecoder that reads from r.
+// streamInput counts leading whitespace only when a value begins beyond the
+// standard decoder's current buffer. The payload is never copied or retained.
+type streamInput struct {
+	r       io.Reader
+	leading int
+	waiting bool
+}
+
+func (r *streamInput) Read(p []byte) (int, error) {
+	n, err := r.r.Read(p)
+	if r.waiting {
+		for _, c := range p[:n] {
+			if !isSpace(c) {
+				r.waiting = false
+				break
+			}
+			r.leading++
+		}
+	}
+	return n, err
+}
+
+// NewStreamDecoder returns a decoder with Sonic's complete embedded Decoder
+// API. Options apply to subsequent values, including values already buffered.
 func NewStreamDecoder(r io.Reader) *StreamDecoder {
-	return &StreamDecoder{dec: json.NewDecoder(r)}
+	d := &StreamDecoder{input: streamInput{r: r}}
+	d.dec = json.NewDecoder(&d.input)
+	return d
 }
 
-// Decode reads the next JSON-encoded value from the stream and stores
-// it in the value pointed to by val.
+func (d *StreamDecoder) configure() {
+	const sticky = OptionUseNumber | OptionDisableUnknown
+	if d.detach || d.configured&sticky&^d.opts != 0 {
+		// json.Decoder's toggles are one-way. Rebuild only when disabling one,
+		// preserving buffered bytes and the stream's absolute input offset.
+		d.offset += d.dec.InputOffset()
+		d.input.r = io.MultiReader(d.dec.Buffered(), d.input.r)
+		d.dec = json.NewDecoder(&d.input)
+		d.configured = 0
+		d.detach = false
+	}
+	if d.opts&OptionUseNumber != 0 && d.configured&OptionUseNumber == 0 {
+		d.dec.UseNumber()
+	}
+	if d.opts&OptionDisableUnknown != 0 && d.configured&OptionDisableUnknown == 0 {
+		d.dec.DisallowUnknownFields()
+	}
+	d.configured = d.opts
+}
+
 func (d *StreamDecoder) Decode(val interface{}) error {
-	return d.dec.Decode(val)
+	if d.terminal != nil {
+		return d.terminal
+	}
+	d.configure()
+	d.input.leading = 0
+	d.input.waiting = true
+	// Buffered creates an independent reader. Looking at its whitespace leaves
+	// the standard decoder's buffer and caller-visible Buffered semantics intact.
+	if buffered, ok := d.dec.Buffered().(*bytes.Reader); ok {
+		for {
+			c, err := buffered.ReadByte()
+			if err != nil {
+				break
+			}
+			if !isSpace(c) {
+				d.input.waiting = false
+				break
+			}
+			d.input.leading++
+		}
+	}
+	before := d.dec.InputOffset()
+	if target := reflect.TypeOf(val); target != d.Decoder.targetType {
+		d.Decoder.targetType = target
+		d.Decoder.retainsRaw = jsonconv.RetainsRawInput(target)
+	}
+	var err error
+	if d.useInt64 {
+		var raw json.RawMessage
+		if err = d.dec.Decode(&raw); err == nil {
+			err = jsonconv.UnmarshalInt64(raw, val, d.disallowUnknown)
+		}
+	} else {
+		err = d.dec.Decode(val)
+	}
+	after := d.dec.InputOffset()
+	d.detach = d.Decoder.retainsRaw && !d.useInt64
+	if err != nil {
+		d.terminal = err
+		d.terminalOffset = d.offset + before + int64(d.input.leading)
+	}
+	if after > before {
+		d.Decoder.src = ""
+		d.Decoder.dec = nil
+		d.Decoder.pos = int(after-before) - d.input.leading
+		if d.Decoder.pos < 0 {
+			d.Decoder.pos = 0
+		}
+	}
+	return err
 }
 
-// Buffered returns a reader over the remaining bytes in the decoder's
-// buffer. Those bytes are available because json.Decoder may read ahead
-// of the value it just decoded.
-func (d *StreamDecoder) Buffered() io.Reader {
-	return d.dec.Buffered()
+func (d *StreamDecoder) buffered() (io.Reader, int) {
+	if d.terminal != nil {
+		return bytes.NewReader(nil), 0
+	}
+	reader := d.dec.Buffered()
+	skipped := 0
+	if b, ok := reader.(*bytes.Reader); ok {
+		for {
+			c, err := b.ReadByte()
+			if err != nil {
+				break
+			}
+			if !isSpace(c) {
+				_ = b.UnreadByte()
+				break
+			}
+			skipped++
+		}
+	}
+	return reader, skipped
 }
-
-// InputOffset returns the number of bytes read from the input stream
-// so far. It mirrors sonic.decoder.StreamDecoder.InputOffset.
+func (d *StreamDecoder) Buffered() io.Reader { reader, _ := d.buffered(); return reader }
 func (d *StreamDecoder) InputOffset() int64 {
-	return d.dec.InputOffset()
+	if d.terminal != nil {
+		return d.terminalOffset
+	}
+	_, skipped := d.buffered()
+	return d.offset + d.dec.InputOffset() + int64(skipped)
 }
-
-// More reports whether there is another element in the current array or
-// object being parsed.
-func (d *StreamDecoder) More() bool {
-	return d.dec.More()
-}
+func (d *StreamDecoder) More() bool { return d.terminal == nil && d.dec.More() }

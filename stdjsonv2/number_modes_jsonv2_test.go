@@ -4,8 +4,6 @@ package stdjsonv2
 
 import (
 	"encoding/json"
-	stdjsontext "encoding/json/jsontext"
-	jsonv2 "encoding/json/v2"
 	"reflect"
 	"strconv"
 	"strings"
@@ -118,7 +116,9 @@ func TestJSONv2NumberModesNilAnyObjectRecursion(t *testing.T) {
 			if !ok {
 				t.Fatalf("value = %#v (%T), want map[string]any", root["value"], root["value"])
 			}
-			assertNumberModeValue(t, merged["old"], "1", tt.useInt64)
+			if _, present := merged["old"]; present {
+				t.Fatal("duplicate interface object retained an old member")
+			}
 			assertNumberModeValue(t, merged["new"], "2", tt.useInt64)
 		})
 	}
@@ -167,7 +167,7 @@ func TestJSONv2NumberModesCallCustomUnmarshalJSONOnce(t *testing.T) {
 	}
 }
 
-func TestJSONv2NumberModesDuplicateValuesFollowJSONv2Merge(t *testing.T) {
+func TestJSONv2NumberModesDuplicateValuesReplaceInterfaceObjects(t *testing.T) {
 	for _, tt := range []struct {
 		name     string
 		cfg      Config
@@ -195,7 +195,9 @@ func TestJSONv2NumberModesDuplicateValuesFollowJSONv2Merge(t *testing.T) {
 			if !ok {
 				t.Fatalf("value = %#v (%T), want map[string]any", object["value"], object["value"])
 			}
-			assertNumberModeValue(t, merged["old"], "1", tt.useInt64)
+			if _, present := merged["old"]; present {
+				t.Fatal("duplicate interface object retained an old member")
+			}
 			assertNumberModeValue(t, merged["new"], "2", tt.useInt64)
 		})
 	}
@@ -230,8 +232,8 @@ func TestJSONv2NumberModesPreservePrepopulatedConcreteInterfaces(t *testing.T) {
 				t.Fatalf("prepopulated map Unmarshal error = %v", err)
 			}
 			mapped, ok := mapOut.(map[string]any)
-			if !ok || mapped["old"] != "keep" {
-				t.Fatalf("map = %#v (%T), want preserved old member", mapOut, mapOut)
+			if !ok || len(mapped) != 1 {
+				t.Fatalf("map = %#v (%T), want replacement map", mapOut, mapOut)
 			}
 			assertNumberModeValue(t, mapped["new"], "1", tt.useInt64)
 
@@ -249,9 +251,7 @@ func TestJSONv2NumberModesPreservePrepopulatedConcreteInterfaces(t *testing.T) {
 			if err := api.Unmarshal([]byte(`2`), &scalarOut); err != nil {
 				t.Fatalf("prepopulated scalar Unmarshal error = %v", err)
 			}
-			if got, ok := scalarOut.(int); !ok || got != 2 {
-				t.Fatalf("scalar = %#v (%T), want int(2)", scalarOut, scalarOut)
-			}
+			assertNumberModeValue(t, scalarOut, "2", tt.useInt64)
 
 			custom := &numberModesJSONv2Custom{}
 			var customOut any = custom
@@ -265,61 +265,31 @@ func TestJSONv2NumberModesPreservePrepopulatedConcreteInterfaces(t *testing.T) {
 	}
 }
 
-func TestJSONv2NumberModesPreservePrepopulatedJSONNumberAcrossKinds(t *testing.T) {
-	tests := []struct {
-		name   string
-		input  string
-		target func() any
-	}{
-		{
-			name:   "object",
-			input:  `{"new":1}`,
-			target: func() any { return json.Number("before") },
-		},
-		{
-			name:   "string",
-			input:  `"after"`,
-			target: func() any { return json.Number("before") },
-		},
-		{
-			name:  "duplicate number then object",
-			input: `{"value":1,"value":{"new":2}}`,
-			target: func() any {
-				return map[string]any{"value": json.Number("before")}
-			},
-		},
-		{
-			name:  "duplicate number then string",
-			input: `{"value":1,"value":"after"}`,
-			target: func() any {
-				return map[string]any{"value": json.Number("before")}
-			},
-		},
-	}
-
+func TestJSONv2NumberModesReplacePrepopulatedJSONNumberAcrossKinds(t *testing.T) {
 	for _, mode := range []struct {
-		name string
-		cfg  Config
+		name   string
+		cfg    Config
+		number any
 	}{
-		{name: "UseNumber", cfg: Config{UseNumber: true}},
-		{name: "UseInt64", cfg: Config{UseInt64: true}},
+		{"UseNumber", Config{UseNumber: true}, json.Number("2")},
+		{"UseInt64", Config{UseInt64: true}, int64(2)},
 	} {
-		for _, tt := range tests {
+		for _, tt := range []struct {
+			name, input  string
+			before, want any
+		}{
+			{"object", `{"new":2}`, json.Number("before"), map[string]any{"new": mode.number}},
+			{"string", `"after"`, json.Number("before"), "after"},
+			{"duplicate number then object", `{"value":1,"value":{"new":2}}`, map[string]any{"value": json.Number("before")}, map[string]any{"value": map[string]any{"new": mode.number}}},
+			{"duplicate number then string", `{"value":1,"value":"after"}`, map[string]any{"value": json.Number("before")}, map[string]any{"value": "after"}},
+		} {
 			t.Run(mode.name+"/"+tt.name, func(t *testing.T) {
-				want := tt.target()
-				wantErr := jsonv2.Unmarshal([]byte(tt.input), &want,
-					jsonv2.DefaultOptionsV2(),
-					stdjsontext.AllowDuplicateNames(true),
-					stdjsontext.AllowInvalidUTF8(true),
-				)
-
-				got := tt.target()
-				gotErr := mode.cfg.Froze().Unmarshal([]byte(tt.input), &got)
-				if (gotErr == nil) != (wantErr == nil) || reflect.TypeOf(gotErr) != reflect.TypeOf(wantErr) {
-					t.Fatalf("Unmarshal error = %T %v; direct JSON-v2 = %T %v", gotErr, gotErr, wantErr, wantErr)
+				got := tt.before
+				if err := mode.cfg.Froze().Unmarshal([]byte(tt.input), &got); err != nil {
+					t.Fatal(err)
 				}
-				if !reflect.DeepEqual(got, want) {
-					t.Fatalf("Unmarshal output = %#v (%T); direct JSON-v2 = %#v (%T)", got, got, want, want)
+				if !reflect.DeepEqual(got, tt.want) {
+					t.Fatalf("got %#v, want %#v", got, tt.want)
 				}
 			})
 		}
@@ -335,20 +305,6 @@ func TestJSONv2NumberModesStreamUseNumberSuccessiveValues(t *testing.T) {
 		}
 		assertNumberModeValue(t, out, want, false)
 	}
-}
-
-func TestJSONv2NumberModesUseNumberTakesPrecedence(t *testing.T) {
-	api := Config{UseNumber: true, UseInt64: true}.Froze()
-	var out map[string]any
-	if err := api.Unmarshal([]byte(`{"n":1,"slice":[2]}`), &out); err != nil {
-		t.Fatalf("Unmarshal error = %v", err)
-	}
-	assertNumberModeValue(t, out["n"], "1", false)
-	slice, ok := out["slice"].([]any)
-	if !ok || len(slice) != 1 {
-		t.Fatalf("slice = %#v (%T), want one-element []any", out["slice"], out["slice"])
-	}
-	assertNumberModeValue(t, slice[0], "2", false)
 }
 
 func TestJSONv2NumberModesConcurrent(t *testing.T) {

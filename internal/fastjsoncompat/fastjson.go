@@ -1,11 +1,6 @@
-// Package fastjsoncompat adapts the valyala/fastjson library to the
-// backend contract for validation and path lookup. It exists as an
-// internal helper so the root sonic package and future fastjson backend
-// can share parsing/validation logic without depending on each other.
-//
-// Marshalling and unmarshalling of arbitrary Go values is delegated to
-// internal/stdjsoncompat (encoding/json) in this phase; the fastjson
-// layer only owns validation, raw-path Get, and AST construction.
+// Package fastjsoncompat implements Sonic-compatible raw validation and path
+// lookup without building an intermediate tree. The byte and string validators
+// share a scanner; long string tokens use the standard library's byte search.
 package fastjsoncompat
 
 import (
@@ -14,18 +9,16 @@ import (
 	"fmt"
 	"math"
 	"strconv"
+	"strings"
 
 	"github.com/bytedance/sonic/ast"
 	"github.com/bytedance/sonic/internal/compatmode"
 	nativetypes "github.com/bytedance/sonic/internal/native/types"
-	vfastjson "github.com/valyala/fastjson"
 )
 
-// Valid reports whether data is a single well-formed JSON value. The fast path
-// uses fastjson's allocation-free validator. Sonic accepts raw control bytes
-// inside strings, while fastjson.ValidateBytes rejects them, so those rare
-// inputs are normalized and checked with encoding/json to preserve only that
-// documented Sonic-compatible exception.
+// Valid checks one complete value using native Sonic's structural string
+// rules. String contents may contain raw controls and unknown escapes; decoding
+// those strings is a separate operation. Strict mode retains standard JSON rules.
 func Valid(data []byte) bool {
 	if len(data) == 0 {
 		return false
@@ -33,10 +26,7 @@ func Valid(data []byte) bool {
 	if compatmode.StdJSON {
 		return json.Valid(data)
 	}
-	if err := vfastjson.ValidateBytes(data); err == nil {
-		return true
-	}
-	return validSonicValueBytes(data)
+	return validSonicValue(data)
 }
 
 // ValidString is the string-input form of Valid.
@@ -47,51 +37,15 @@ func ValidString(data string) bool {
 	if compatmode.StdJSON {
 		return json.Valid([]byte(data))
 	}
-	if err := vfastjson.Validate(data); err == nil {
-		return true
-	}
-	return validSonicValueBytes([]byte(data))
+	return validSonicValue(data)
 }
 
-func validSonicValueBytes(data []byte) bool {
-	return json.Valid(escapeRawStringControls(data))
-}
+type jsonInput interface{ []byte | string }
 
-func escapeRawStringControls(data []byte) []byte {
-	var out []byte
-	last := 0
-	inString := false
-	escaped := false
-	const hex = "0123456789abcdef"
-	for i, c := range data {
-		if !inString {
-			if c == '"' {
-				inString = true
-			}
-			continue
-		}
-		if escaped {
-			escaped = false
-			continue
-		}
-		switch {
-		case c == '\\':
-			escaped = true
-		case c == '"':
-			inString = false
-		case c < 0x20:
-			if out == nil {
-				out = make([]byte, 0, len(data)+5)
-			}
-			out = append(out, data[last:i]...)
-			out = append(out, '\\', 'u', '0', '0', hex[c>>4], hex[c&0x0f])
-			last = i + 1
-		}
-	}
-	if out == nil {
-		return data
-	}
-	return append(out, data[last:]...)
+func validSonicValue[T jsonInput](data T) bool {
+	start := skipJSONSpace(data, 0)
+	end, ok := scanValueEnd(data, start, 0)
+	return ok && skipJSONSpace(data, end) == len(data)
 }
 
 // Get resolves path against data and returns the matching AST node.
@@ -125,6 +79,21 @@ func Get(data []byte, opts ast.SearchOptions, path ...interface{}) (ast.Node, er
 		}
 	}
 	return ast.NewSearcher(string(data)).GetByPath()
+}
+
+// GetString keeps the input as a string throughout lookup. Searcher owns only
+// the selected substring when CopyReturn is set; unrelated input is never
+// copied. Strict mode validates the whole document before selecting a value.
+func GetString(data string, opts ast.SearchOptions, path ...interface{}) (ast.Node, error) {
+	if compatmode.StdJSON {
+		if !json.Valid([]byte(data)) {
+			return ast.Node{}, &ast.SyntaxError{Src: data, Msg: "invalid JSON value", Code: nativetypes.ERR_INVALID_CHAR}
+		}
+		opts.ValidateJSON = false
+	}
+	s := ast.NewSearcher(data)
+	s.SearchOptions = opts
+	return s.GetByPath(path...)
 }
 
 func shouldUseSearcher(opts ast.SearchOptions) bool {
@@ -190,47 +159,6 @@ func scanSyntaxError(data []byte) error {
 		Code: nativetypes.ERR_INVALID_CHAR,
 	}
 }
-
-// mapFastjsonError mirrors ast.mapFastjsonError but is duplicated here to
-// avoid exporting internal helpers. It maps a fastjson parse error to a
-// ast.SyntaxError or ast.ErrNotExist depending on kind.
-func mapFastjsonError(src string, err error) error {
-	if err == nil {
-		return nil
-	}
-	// fastjson returns a small set of concrete error types. We surface the
-	// raw error wrapped so callers can inspect it; ast.SyntaxError is used
-	// only when a position can be located. For compatibility with the ast
-	// package's behavior we translate to nativetypes.ParsingError when the
-	// error is structural.
-	_ = src
-	// Distinguish "not exist" (null/missing) from true syntax errors.
-	if isNotExist(err) {
-		return ast.ErrNotExist
-	}
-	// Map known syntax failures to a generic syntax error so the public
-	// API returns a stable type. The ast package already does this for its
-	// own searcher; we keep the same shape here.
-	return &ast.SyntaxError{
-		Msg:  err.Error(),
-		Code: nativetypes.ERR_INVALID_CHAR,
-	}
-}
-
-// isNotExist reports whether err is a fastjson "not exist" error.
-func isNotExist(err error) bool {
-	if err == nil {
-		return false
-	}
-	// fastjson uses *fastjson.Error with a small set of codes; "not exist"
-	// surfaces as a typed nil dereference in some paths. We match by message
-	// to avoid importing the internal fastjson error type.
-	msg := err.Error()
-	return msg == "value not found" || msg == "key not found" || msg == "index out of range"
-}
-
-// Compile-time guard: ensure the helper returns something assignable to error.
-var _ = fmt.Errorf
 
 type scanStatus int
 
@@ -562,7 +490,7 @@ func scanContainerEnd(data []byte, start int) (int, bool) {
 	return 0, false
 }
 
-func scanValueEnd(data []byte, start int, depth int) (int, bool) {
+func scanValueEnd[T jsonInput](data T, start int, depth int) (int, bool) {
 	if depth > maxScanDepth || start >= len(data) {
 		return 0, false
 	}
@@ -587,7 +515,10 @@ func scanValueEnd(data []byte, start int, depth int) (int, bool) {
 	return 0, false
 }
 
-func scanObjectEnd(data []byte, start int, depth int) (int, bool) {
+func scanObjectEnd[T jsonInput](data T, start int, depth int) (int, bool) {
+	if depth > maxScanDepth {
+		return 0, false
+	}
 	i := skipJSONSpace(data, start+1)
 	if i < len(data) && data[i] == '}' {
 		return i + 1, true
@@ -625,7 +556,10 @@ func scanObjectEnd(data []byte, start int, depth int) (int, bool) {
 	return 0, false
 }
 
-func scanArrayEnd(data []byte, start int, depth int) (int, bool) {
+func scanArrayEnd[T jsonInput](data T, start int, depth int) (int, bool) {
+	if depth > maxScanDepth {
+		return 0, false
+	}
 	i := skipJSONSpace(data, start+1)
 	if i < len(data) && data[i] == ']' {
 		return i + 1, true
@@ -651,9 +585,14 @@ func scanArrayEnd(data []byte, start int, depth int) (int, bool) {
 	return 0, false
 }
 
-func scanStringEnd(data []byte, start int) (int, bool) {
+// Short keys avoid search-call overhead. For longer strings, locate quotes
+// with the optimized byte search and count their immediately preceding slashes
+// to distinguish escaped quotes without rescanning the whole string body.
+func scanStringEnd[T jsonInput](data T, start int) (int, bool) {
 	escaped := false
-	for i := start + 1; i < len(data); i++ {
+	i := start + 1
+	shortEnd := min(len(data), i+16)
+	for ; i < shortEnd; i++ {
 		if escaped {
 			escaped = false
 			continue
@@ -666,17 +605,38 @@ func scanStringEnd(data []byte, start int) (int, bool) {
 			return i + 1, true
 		}
 	}
+	for i < len(data) {
+		off := -1
+		switch src := any(data).(type) {
+		case string:
+			off = strings.IndexByte(src[i:], '"')
+		case []byte:
+			off = bytes.IndexByte(src[i:], '"')
+		}
+		if off < 0 {
+			return 0, false
+		}
+		quote := i + off
+		slash := quote - 1
+		for slash > start && data[slash] == '\\' {
+			slash--
+		}
+		if (quote-slash-1)%2 == 0 {
+			return quote + 1, true
+		}
+		i = quote + 1
+	}
 	return 0, false
 }
 
-func scanLiteral(data []byte, start int, lit string) (int, bool) {
-	if len(data)-start < len(lit) || !bytes.Equal(data[start:start+len(lit)], []byte(lit)) {
+func scanLiteral[T jsonInput](data T, start int, lit string) (int, bool) {
+	if len(data)-start < len(lit) || string(data[start:start+len(lit)]) != lit {
 		return 0, false
 	}
 	return start + len(lit), true
 }
 
-func scanNumberEnd(data []byte, start int) (int, bool) {
+func scanNumberEnd[T jsonInput](data T, start int) (int, bool) {
 	i := start
 	if data[i] == '-' {
 		i++
@@ -686,8 +646,10 @@ func scanNumberEnd(data []byte, start int) (int, bool) {
 	}
 	if data[i] == '0' {
 		i++
-		for i < len(data) && data[i] >= '0' && data[i] <= '9' {
-			i++
+		// Native Sonic finishes a zero immediately unless a fraction or
+		// exponent follows. In particular, a selected "01" is the value 0.
+		if i == len(data) || data[i] != '.' && data[i] != 'e' && data[i] != 'E' {
+			return i, true
 		}
 	} else if data[i] >= '1' && data[i] <= '9' {
 		for i < len(data) && data[i] >= '0' && data[i] <= '9' {
@@ -707,9 +669,6 @@ func scanNumberEnd(data []byte, start int) (int, bool) {
 	}
 	if i < len(data) && (data[i] == 'e' || data[i] == 'E') {
 		i++
-		if i < len(data) && isJSONNumberTerminator(data[i]) {
-			return i, true
-		}
 		if i < len(data) && (data[i] == '+' || data[i] == '-') {
 			i++
 		}
@@ -720,10 +679,16 @@ func scanNumberEnd(data []byte, start int) (int, bool) {
 			i++
 		}
 	}
+	if i < len(data) {
+		switch data[i] {
+		case '+', '-', '.', 'e', 'E':
+			return 0, false
+		}
+	}
 	return i, true
 }
 
-func skipJSONSpace(data []byte, i int) int {
+func skipJSONSpace[T jsonInput](data T, i int) int {
 	for i < len(data) {
 		switch data[i] {
 		case ' ', '\n', '\r', '\t':

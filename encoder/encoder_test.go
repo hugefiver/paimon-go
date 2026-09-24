@@ -267,8 +267,8 @@ func TestValidOnlyWhitespace(t *testing.T) {
 	if ok {
 		t.Fatalf("expected invalid for whitespace-only")
 	}
-	if start != len(data) {
-		t.Fatalf("start = %d, want %d", start, len(data))
+	if start != 3 {
+		t.Fatalf("start = %d, want native EOF cursor 3", start)
 	}
 }
 
@@ -345,7 +345,7 @@ func TestEncoderSetPrefixOnlyIndent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Encode error = %v", err)
 	}
-	const want = "{\nP\"a\": 1\nP}\n"
+	const want = "{\nP\"a\": 1\nP}"
 	if string(got) != want {
 		t.Fatalf("prefix-only SetIndent output = %q, want %q", got, want)
 	}

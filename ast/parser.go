@@ -2,10 +2,8 @@ package ast
 
 import (
 	"fmt"
-	"strings"
 
 	nativetypes "github.com/bytedance/sonic/internal/native/types"
-	vfastjson "github.com/valyala/fastjson"
 )
 
 // NewParser builds a Parser for the given JSON source.
@@ -26,34 +24,59 @@ func (p *Parser) Parse() (Node, nativetypes.ParsingError) {
 		return Node{typ: V_ERROR, exists: true, loaded: true, err: fmt.Errorf("nil parser")}, nativetypes.ERR_INVALID_CHAR
 	}
 
-	attemptPos := p.pos
-	start := skipJSONSpaceString(p.src, attemptPos)
+	start := skipJSONSpaceString(p.src, p.pos)
 	if start == len(p.src) {
-		return parserErrorNode(nativetypes.ERR_EOF)
+		p.pos = start
+		return Node{}, nativetypes.ERR_EOF
 	}
-
 	switch p.src[start] {
 	case '[', '{':
 		return p.parseContainer(start)
-	}
-
-	end, ok := scanFirstValueEnd(p.src, start)
-	if !ok {
-		return parserErrorNode(parserTokenError(p.src, start))
-	}
-	node, code := parseRawToNodeEx(p.src[start:end])
-	if code != 0 {
-		// A bare exponent is accepted when its source terminator made the
-		// token scannable. Preserve that local-parser compatibility without
-		// including the following token in this incremental parse.
-		if validScannedRootRaw(p.src, start, end) && isBareExponent(p.src[start:end]) {
-			p.pos = end
-			return NewNumber(p.src[start:end]), 0
+	case '"':
+		end, ok := scanStringEnd(p.src, start)
+		if !ok {
+			p.pos = len(p.src)
+			return Node{}, nativetypes.ERR_EOF
 		}
-		return parserErrorNode(code)
+		p.pos = end
+		lp := localParser{src: p.src[start:end]}
+		v, code := lp.parseString()
+		if code == nativetypes.ERR_INVALID_UNICODE {
+			code = nativetypes.ERR_INVALID_CHAR
+		}
+		if code != 0 {
+			return Node{}, code
+		}
+		return NewString(v), 0
+	case 't', 'f', 'n':
+		literal := "true"
+		value := NewBool(true)
+		if p.src[start] == 'f' {
+			literal, value = "false", NewBool(false)
+		}
+		if p.src[start] == 'n' {
+			literal, value = "null", NewNull()
+		}
+		for i := range literal {
+			p.pos = start + i
+			if p.pos >= len(p.src) {
+				return Node{}, nativetypes.ERR_EOF
+			}
+			if p.src[p.pos] != literal[i] {
+				return Node{}, nativetypes.ERR_INVALID_CHAR
+			}
+		}
+		p.pos = start + len(literal)
+		return value, 0
+	default:
+		lp := localParser{src: p.src, pos: start}
+		v, code := lp.parseNumber()
+		p.pos = lp.pos
+		if code != 0 {
+			return Node{}, code
+		}
+		return NewNumber(v), 0
 	}
-	p.pos = end
-	return node, 0
 }
 
 // parseContainer returns an independently lazy node. A non-empty container
@@ -74,36 +97,11 @@ func (p *Parser) parseContainer(start int) (Node, nativetypes.ParsingError) {
 		return NewObject(nil), 0
 	}
 
-	if end, ok := scanFirstValueEnd(p.src, start); ok {
-		return newParserContainerNode(p.src[start:end], typ), 0
-	}
 	return newParserContainerNode(p.src[start:], typ), 0
 }
 
 func newParserContainerNode(raw string, typ int) Node {
-	return Node{typ: typ, exists: true, loaded: false, raw: raw}
-}
-
-func parserErrorNode(code nativetypes.ParsingError) (Node, nativetypes.ParsingError) {
-	return Node{typ: V_ERROR, exists: true, loaded: true, err: code}, code
-}
-
-func parserTokenError(src string, start int) nativetypes.ParsingError {
-	switch c := src[start]; {
-	case c == '"', c == '-', c >= '0' && c <= '9', c == 't', c == 'f', c == 'n':
-		_, code := parseRawToNodeEx(src[start:])
-		return code
-	default:
-		return nativetypes.ERR_INVALID_CHAR
-	}
-}
-
-func isBareExponent(raw string) bool {
-	if len(raw) == 0 {
-		return false
-	}
-	last := raw[len(raw)-1]
-	return last == 'e' || last == 'E'
+	return Node{typ: typ, exists: true, loaded: true, raw: raw, lazyPos: 1}
 }
 
 // ExportError converts a ParsingError code returned by Parse into an
@@ -113,11 +111,7 @@ func (p *Parser) ExportError(code nativetypes.ParsingError) error {
 		return nil
 	}
 	pos := p.pos
-	src := p.src
-	if len(src) > 64 {
-		src = src[:32] + "..." + src[len(src)-29:]
-	}
-	return &SyntaxError{Pos: pos, Src: src, Code: code, Msg: code.Message()}
+	return &SyntaxError{Pos: pos, Src: p.src, Code: code, Msg: code.Message()}
 }
 
 // Pos returns the parser's current source position, useful after a
@@ -127,190 +121,4 @@ func (p *Parser) Pos() int {
 		return 0
 	}
 	return p.pos
-}
-
-// parseRawToNode parses a JSON document into a fully realized Node tree.
-// On error it returns a zero node and a non-zero ParsingError.
-func parseRawToNode(src string) (Node, nativetypes.ParsingError) {
-	return parseRawToNodeEx(src)
-}
-
-// parseRawToNodeEx is the worker for parseRawToNode. It uses the local
-// recursive-descent parser (not fastjson) so string unescaping follows
-// Sonic semantics (unpaired surrogates -> U+FFFD, unknown escapes are
-// errors) and the nesting limit matches Sonic's MAX_RECURSE (4096).
-func parseRawToNodeEx(src string) (Node, nativetypes.ParsingError) {
-	return parseRawToNodeLocal(src)
-}
-
-// fastjsonValueToNode deep-copies a fastjson Value into a Node. The
-// returned Node owns none of the fastjson parser's memory.
-func fastjsonValueToNode(v *vfastjson.Value) (Node, nativetypes.ParsingError) {
-	if v == nil {
-		return NewNull(), 0
-	}
-	switch v.Type() {
-	case vfastjson.TypeNull:
-		return NewNull(), 0
-	case vfastjson.TypeTrue:
-		return NewBool(true), 0
-	case vfastjson.TypeFalse:
-		return NewBool(false), 0
-	case vfastjson.TypeString:
-		// fastjson's unescape is "best-effort": an unpaired \uD800
-		// surrogate stays as literal backslash text instead of U+FFFD,
-		// which breaks string equality and object-key lookup. Re-quote
-		// the (already unescaped) content and decode through the local
-		// parser's unescape rules is not possible (the escape structure
-		// is lost), so accept fastjson's decoding for the searcher
-		// fallback path; the primary Parser path no longer routes
-		// through fastjson.
-		s, err := v.StringBytes()
-		if err != nil {
-			return Node{}, nativetypes.ERR_INVALID_CHAR
-		}
-		return NewString(string(s)), 0
-	case vfastjson.TypeNumber:
-		// fastjson's Value.String() for a TypeNumber value returns the
-		// raw number literal (MarshalTo appends v.s verbatim for numbers).
-		num, ok := sonicNumberLiteral(v.String())
-		if !ok {
-			return Node{}, nativetypes.ERR_INVALID_NUMBER_FMT
-		}
-		return NewNumber(num), 0
-	case vfastjson.TypeArray:
-		arr, err := v.Array()
-		if err != nil {
-			return Node{}, nativetypes.ERR_INVALID_CHAR
-		}
-		out := make([]Node, 0, len(arr))
-		for _, e := range arr {
-			n, code := fastjsonValueToNode(e)
-			if code != 0 {
-				return Node{}, code
-			}
-			out = append(out, n)
-		}
-		return NewArray(out), 0
-	case vfastjson.TypeObject:
-		obj, err := v.Object()
-		if err != nil {
-			return Node{}, nativetypes.ERR_INVALID_CHAR
-		}
-		var pairs []Pair
-		var firstErr nativetypes.ParsingError
-		obj.Visit(func(k []byte, ev *vfastjson.Value) {
-			if firstErr != 0 {
-				return
-			}
-			if code := func() nativetypes.ParsingError {
-				n, code := fastjsonValueToNode(ev)
-				if code != 0 {
-					return code
-				}
-				pairs = append(pairs, NewPair(string(k), n))
-				return 0
-			}(); code != 0 {
-				firstErr = code
-			}
-		})
-		if firstErr != 0 {
-			return Node{}, firstErr
-		}
-		return NewObject(pairs), 0
-	}
-	return Node{typ: V_ERROR, exists: true, loaded: true, err: fmt.Errorf("unknown fastjson type %d", v.Type())}, nativetypes.ERR_INVALID_CHAR
-}
-
-// sonicNumberLiteral validates a JSON number literal. Leading zeros
-// followed by more digits (e.g. "0123") consume the full digit run so
-// the raw literal is preserved verbatim, matching Sonic's lenient
-// number handling instead of silently truncating the value.
-func sonicNumberLiteral(lit string) (string, bool) {
-	if lit == "" {
-		return "", false
-	}
-	i := 0
-	if lit[i] == '-' {
-		i++
-		if i == len(lit) {
-			return "", false
-		}
-	}
-	intStart := i
-	if lit[i] == '0' {
-		i++
-		// Consume any additional digits so leading-zero literals such as
-		// "0123" round-trip as-is rather than being cut to "0".
-		for i < len(lit) && lit[i] >= '0' && lit[i] <= '9' {
-			i++
-		}
-	} else if lit[i] >= '1' && lit[i] <= '9' {
-		for i < len(lit) && lit[i] >= '0' && lit[i] <= '9' {
-			i++
-		}
-	} else {
-		return "", false
-	}
-	if i < len(lit) && lit[i] == '.' {
-		i++
-		if i == len(lit) || lit[i] < '0' || lit[i] > '9' {
-			return "", false
-		}
-		for i < len(lit) && lit[i] >= '0' && lit[i] <= '9' {
-			i++
-		}
-	}
-	if i < len(lit) && (lit[i] == 'e' || lit[i] == 'E') {
-		i++
-		if i < len(lit) && (lit[i] == '+' || lit[i] == '-') {
-			i++
-		}
-		if i == len(lit) || lit[i] < '0' || lit[i] > '9' {
-			return "", false
-		}
-		for i < len(lit) && lit[i] >= '0' && lit[i] <= '9' {
-			i++
-		}
-	}
-	if i != len(lit) || i == intStart {
-		return "", false
-	}
-	return lit, true
-}
-
-// mapFastjsonError converts a fastjson parse error into a Sonic-shaped
-// ParsingError code. The mapping is heuristic and matches the broad
-// category of the failure rather than the exact byte Sonic would pick.
-func mapFastjsonError(src string, err error) nativetypes.ParsingError {
-	if err == nil {
-		return 0
-	}
-	msg := err.Error()
-	switch {
-	case strings.Contains(msg, "unexpected tail"),
-		strings.Contains(msg, "missing '"),
-		strings.Contains(msg, "missing ','"),
-		strings.Contains(msg, "missing ':'"),
-		strings.Contains(msg, "missing closing"),
-		strings.Contains(msg, "cannot find opening"):
-		return nativetypes.ERR_MISMATCH
-	case strings.Contains(msg, "cannot parse number"):
-		return nativetypes.ERR_INVALID_NUMBER_FMT
-	case strings.Contains(msg, "cannot parse string"),
-		strings.Contains(msg, "cannot parse object key"):
-		return nativetypes.ERR_INVALID_CHAR
-	case strings.Contains(msg, "empty string"),
-		strings.Contains(msg, "unexpected value"),
-		strings.Contains(msg, "unexpected char"),
-		strings.Contains(msg, "unexpected end"):
-		return nativetypes.ERR_INVALID_CHAR
-	case strings.Contains(msg, "too big depth"):
-		return nativetypes.ERR_RECURSE_EXCEED_MAX
-	case strings.Contains(msg, "escape"):
-		return nativetypes.ERR_INVALID_ESCAPE
-	case strings.Contains(msg, "unicode"):
-		return nativetypes.ERR_INVALID_UNICODE
-	}
-	return nativetypes.ERR_INVALID_CHAR
 }

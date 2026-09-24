@@ -2,11 +2,12 @@ package encoder
 
 import (
 	"encoding/json"
-	"strconv"
 	"testing"
+	"unicode/utf8"
 )
 
-// FuzzQuote compares encoder.Quote with strconv.Quote for arbitrary strings.
+// FuzzQuote verifies JSON validity and round trips for valid UTF-8. Native
+// Sonic preserves invalid UTF-8 bytes, so those inputs are checked separately.
 func FuzzQuote(f *testing.F) {
 	seeds := []string{
 		``,
@@ -27,15 +28,20 @@ here`,
 
 	f.Fuzz(func(t *testing.T, s string) {
 		got := Quote(s)
-		want := strconv.Quote(s)
-		if got != want {
-			t.Fatalf("Quote mismatch: got %q want %q (input=%q)", got, want, s)
+		if !json.Valid([]byte(got)) {
+			t.Fatalf("invalid quoted JSON %q", got)
+		}
+		if utf8.ValidString(s) {
+			var out string
+			if err := json.Unmarshal([]byte(got), &out); err != nil || out != s {
+				t.Fatalf("Quote roundtrip = %q, %v; want %q", out, err, s)
+			}
 		}
 	})
 }
 
-// FuzzValid compares encoder.Valid with encoding/json.Valid for arbitrary
-// bytes. encoder.Valid returns (ok, start) and wraps json.Valid today.
+// FuzzValid verifies that native structural validation accepts standard JSON
+// and that successful bounds point to the first non-whitespace byte.
 func FuzzValid(f *testing.F) {
 	seeds := []string{
 		``,
@@ -57,8 +63,14 @@ func FuzzValid(f *testing.F) {
 	f.Fuzz(func(t *testing.T, data []byte) {
 		gotOk, _ := Valid(data)
 		wantOk := json.Valid(data)
-		if gotOk != wantOk {
-			t.Fatalf("Valid mismatch: got %v want %v (data=%q)", gotOk, wantOk, data)
+		if wantOk && !gotOk {
+			t.Fatalf("standard JSON rejected: %q", data)
+		}
+		if gotOk {
+			_, start := Valid(data)
+			if start != firstNonSpaceOffset(data) {
+				t.Fatalf("invalid start %d for %q", start, data)
+			}
 		}
 	})
 }

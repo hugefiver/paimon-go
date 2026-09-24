@@ -23,9 +23,14 @@ package stdjsoncompat
 
 import (
 	"bytes"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"io"
+	"reflect"
+	"sync"
+
+	"github.com/bytedance/sonic/option"
 
 	"github.com/bytedance/sonic/internal/backend"
 	"github.com/bytedance/sonic/internal/jsonconv"
@@ -33,23 +38,76 @@ import (
 
 // Marshal serializes v under cfg. SortMapKeys is honored natively by
 // encoding/json.
+type encodeState struct {
+	buf         []byte
+	enc         *json.Encoder
+	dropNewline bool
+}
+
+func (s *encodeState) Write(p []byte) (int, error) {
+	n := len(p)
+	if s.dropNewline && n > 0 && p[n-1] == '\n' {
+		p = p[:n-1]
+	}
+	s.buf = append(s.buf, p...)
+	return n, nil
+}
+
+func newEncodeState() *encodeState {
+	s := new(encodeState)
+	s.enc = json.NewEncoder(s)
+	return s
+}
+
+var encodePool = sync.Pool{New: func() any { return newEncodeState() }}
+
+func (s *encodeState) reset() {
+	if uint(cap(s.buf)) > option.LimitBufferSize {
+		s.buf = nil
+		s.enc = json.NewEncoder(s) // also release the encoder's indentation buffer
+	} else {
+		s.buf = s.buf[:0]
+	}
+}
+
+func (s *encodeState) encode(v any, cfg backend.Config, prefix, indent string) error {
+	s.enc.SetEscapeHTML(cfg.EscapeHTML)
+	s.enc.SetIndent(prefix, indent)
+	return s.enc.Encode(v)
+}
+
 func Marshal(v interface{}, cfg backend.Config) ([]byte, error) {
 	if cfg.EscapeHTML {
 		return json.Marshal(v)
 	}
+	return marshal(v, cfg, "", "")
+}
 
-	var buf bytes.Buffer
-	enc := json.NewEncoder(&buf)
-	enc.SetEscapeHTML(false)
-	if err := enc.Encode(v); err != nil {
+func marshal(v any, cfg backend.Config, prefix, indent string) ([]byte, error) {
+	s := encodePool.Get().(*encodeState)
+	defer func() { s.dropNewline = false; s.reset(); encodePool.Put(s) }()
+	s.dropNewline = true
+	if err := s.encode(v, cfg, prefix, indent); err != nil {
 		return nil, err
 	}
-	// json.Encoder.Encode appends a newline; trim it to match Marshal.
-	out := buf.Bytes()
-	if n := len(out); n > 0 && out[n-1] == '\n' {
-		out = out[:n-1]
+	return bytes.Clone(s.buf), nil
+}
+
+// Append marshals directly into dst, preserving its contents on error. The
+// standard encoder completes validation before invoking its writer.
+func Append(dst *[]byte, v any, cfg backend.Config) error {
+	s := encodePool.Get().(*encodeState)
+	retained := s.buf
+	s.buf = *dst
+	s.dropNewline = true
+	err := s.encode(v, cfg, "", "")
+	if err == nil {
+		*dst = s.buf
 	}
-	return out, nil
+	s.buf = retained
+	s.dropNewline = false
+	encodePool.Put(s)
+	return err
 }
 
 // MarshalIndent is like Marshal but applies the caller's prefix and indent.
@@ -57,25 +115,16 @@ func MarshalIndent(v interface{}, prefix, indent string, cfg backend.Config) ([]
 	if cfg.EscapeHTML {
 		return json.MarshalIndent(v, prefix, indent)
 	}
-
-	var buf bytes.Buffer
-	enc := json.NewEncoder(&buf)
-	enc.SetEscapeHTML(false)
-	enc.SetIndent(prefix, indent)
-	if err := enc.Encode(v); err != nil {
-		return nil, err
-	}
-	out := buf.Bytes()
-	if n := len(out); n > 0 && out[n-1] == '\n' {
-		out = out[:n-1]
-	}
-	return out, nil
+	return marshal(v, cfg, prefix, indent)
 }
 
 // Unmarshal parses data into v under cfg.
 func Unmarshal(data []byte, v interface{}, cfg backend.Config) error {
 	data = normalizeUnmarshalInput(data)
-	if cfg.UseNumber || cfg.UseInt64 {
+	if cfg.UseInt64 && !cfg.UseNumber {
+		return jsonconv.UnmarshalInt64(data, v, cfg.DisallowUnknownFields)
+	}
+	if cfg.UseNumber {
 		dec := json.NewDecoder(bytes.NewReader(data))
 		dec.UseNumber()
 		if cfg.DisallowUnknownFields {
@@ -87,9 +136,6 @@ func Unmarshal(data []byte, v interface{}, cfg backend.Config) error {
 		if err := rejectTrailingData(dec); err != nil {
 			return err
 		}
-		if cfg.UseInt64 && !cfg.UseNumber {
-			jsonconv.ConvertNumbersToInt64(v)
-		}
 		return nil
 	}
 	if cfg.DisallowUnknownFields {
@@ -100,6 +146,13 @@ func Unmarshal(data []byte, v interface{}, cfg backend.Config) error {
 		}
 		return rejectTrailingData(dec)
 	}
+	// Only plain dynamic targets use the token cursor. It retains full syntax
+	// validation and falls back for existing maps or concrete interface pointers.
+	switch v.(type) {
+	case *any, *map[string]any:
+		return jsonconv.UnmarshalDynamic(data, v)
+	}
+
 	return json.Unmarshal(data, v)
 }
 
@@ -118,6 +171,9 @@ func rejectTrailingData(dec *json.Decoder) error {
 }
 
 func escapeRawControlsInStrings(data []byte) []byte {
+	if !containsControlByte(data) {
+		return data
+	}
 	var out []byte
 	inString := false
 	escaped := false
@@ -154,6 +210,25 @@ func escapeRawControlsInStrings(data []byte) []byte {
 	return out
 }
 
+// A compact JSON document normally contains no literal C0 bytes. Check eight
+// bytes at once before running the quote/escape state machine. Borrow between
+// bytes can cause a harmless false positive, but never hide a control byte.
+func containsControlByte(data []byte) bool {
+	for len(data) >= 8 {
+		word := binary.LittleEndian.Uint64(data)
+		if (word-0x2020202020202020)&^word&0x8080808080808080 != 0 {
+			return true
+		}
+		data = data[8:]
+	}
+	for _, b := range data {
+		if b < 0x20 {
+			return true
+		}
+	}
+	return false
+}
+
 func hexDigit(b byte) byte {
 	if b < 10 {
 		return '0' + b
@@ -170,6 +245,7 @@ func Valid(data []byte) bool {
 func NewEncoder(w io.Writer, cfg backend.Config) backend.StreamEncoder {
 	return &streamEncoder{
 		w:          w,
+		state:      newEncodeState(),
 		noNewline:  cfg.NoEncoderNewline,
 		escapeHTML: cfg.EscapeHTML,
 	}
@@ -186,6 +262,7 @@ func NewDecoder(r io.Reader, cfg backend.Config) backend.StreamDecoder {
 	}
 	return &streamDecoder{
 		dec:                   dec,
+		reader:                r,
 		useInt64:              cfg.UseInt64,
 		useNumber:             cfg.UseNumber,
 		disallowUnknownFields: cfg.DisallowUnknownFields,
@@ -194,6 +271,7 @@ func NewDecoder(r io.Reader, cfg backend.Config) backend.StreamDecoder {
 
 // streamEncoder wraps json.Encoder and honors NoEncoderNewline.
 type streamEncoder struct {
+	state      *encodeState
 	w          io.Writer
 	noNewline  bool
 	escapeHTML bool
@@ -202,26 +280,22 @@ type streamEncoder struct {
 }
 
 func (e *streamEncoder) Encode(v interface{}) error {
-	var buf bytes.Buffer
-	enc := json.NewEncoder(&buf)
-	enc.SetEscapeHTML(e.escapeHTML)
-	enc.SetIndent(e.prefix, e.indent)
-	if err := enc.Encode(v); err != nil {
+	s := e.state
+	defer s.reset()
+	s.dropNewline = e.noNewline
+	if err := s.encode(v, backend.Config{EscapeHTML: e.escapeHTML}, e.prefix, e.indent); err != nil {
 		return err
 	}
-	out := buf.Bytes()
-	if e.noNewline && len(out) > 0 && out[len(out)-1] == '\n' {
-		out = out[:len(out)-1]
-	}
-	for offset := 0; offset < len(out); {
-		n, err := e.w.Write(out[offset:])
+	out := s.buf
+	for len(out) > 0 {
+		n, err := e.w.Write(out)
 		if err != nil {
 			return err
 		}
-		if n <= 0 || n > len(out)-offset {
+		if n <= 0 || n > len(out) {
 			return io.ErrShortWrite
 		}
-		offset += n
+		out = out[n:]
 	}
 	return nil
 }
@@ -237,6 +311,11 @@ func (e *streamEncoder) SetIndent(prefix, indent string) {
 
 // streamDecoder wraps json.Decoder and forwards the streaming knobs.
 type streamDecoder struct {
+	reader                io.Reader
+	detach                bool
+	targetType            reflect.Type
+	retainsRaw            bool
+	terminal              error
 	dec                   *json.Decoder
 	useInt64              bool
 	useNumber             bool
@@ -244,17 +323,60 @@ type streamDecoder struct {
 }
 
 func (d *streamDecoder) Decode(v interface{}) error {
-	if err := d.dec.Decode(v); err != nil {
-		return err
+	if d.terminal != nil {
+		return d.terminal
 	}
+	if d.detach {
+		d.reader = io.MultiReader(d.dec.Buffered(), d.reader)
+		d.dec = json.NewDecoder(d.reader)
+		if d.useNumber {
+			d.dec.UseNumber()
+		}
+		if d.disallowUnknownFields {
+			d.dec.DisallowUnknownFields()
+		}
+		d.detach = false
+	}
+	if target := reflect.TypeOf(v); target != d.targetType {
+		d.targetType = target
+		d.retainsRaw = jsonconv.RetainsRawInput(target)
+	}
+	var err error
 	if d.useInt64 && !d.useNumber {
-		jsonconv.ConvertNumbersToInt64(v)
+		var raw json.RawMessage
+		if err = d.dec.Decode(&raw); err == nil {
+			err = jsonconv.UnmarshalInt64(raw, v, d.disallowUnknownFields)
+		}
+	} else {
+		err = d.dec.Decode(v)
 	}
-	return nil
+	d.detach = d.retainsRaw && (!d.useInt64 || d.useNumber)
+	if err != nil {
+		d.terminal = err
+	}
+	return err
 }
 
 func (d *streamDecoder) Buffered() io.Reader {
-	return d.dec.Buffered()
+	if d.terminal != nil {
+		return bytes.NewReader(nil)
+	}
+	reader := d.dec.Buffered()
+	// Native Sonic consumes buffered whitespace after the decoded value,
+	// without reading ahead from the underlying stream.
+	if b, ok := reader.(*bytes.Reader); ok {
+		for {
+			c, err := b.ReadByte()
+			if err != nil {
+				break
+			}
+			if c != ' ' && c != '\t' && c != '\r' && c != '\n' {
+				_ = b.UnreadByte()
+				break
+			}
+		}
+	}
+	return reader
 }
 
 func (d *streamDecoder) DisallowUnknownFields() {
@@ -263,6 +385,9 @@ func (d *streamDecoder) DisallowUnknownFields() {
 }
 
 func (d *streamDecoder) More() bool {
+	if d.terminal != nil {
+		return false
+	}
 	return d.dec.More()
 }
 

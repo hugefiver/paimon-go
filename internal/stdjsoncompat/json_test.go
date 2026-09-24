@@ -57,3 +57,22 @@ func TestMarshalIndentCallsMarshalerOnceWithoutHTMLEscape(t *testing.T) {
 		t.Fatalf("MarshalIndent output has trailing newline: %q", got)
 	}
 }
+
+func TestControlByteFastCheck(t *testing.T) {
+	for length := 0; length <= 24; length++ {
+		for pos := 0; pos < length; pos++ {
+			for value := 0; value <= 255; value++ {
+				data := bytes.Repeat([]byte{0xff}, length)
+				data[pos] = byte(value)
+				if got, want := containsControlByte(data), value < 0x20; got != want {
+					t.Fatalf("length=%d position=%d value=%d: %v want %v", length, pos, value, got, want)
+				}
+			}
+		}
+	}
+	for _, data := range [][]byte{nil, []byte(`{"x":"plain \\\\u0000 text"}`), bytes.Repeat([]byte{' '}, 64)} {
+		if containsControlByte(data) {
+			t.Fatalf("unexpected control byte in %q", data)
+		}
+	}
+}

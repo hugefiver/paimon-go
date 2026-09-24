@@ -127,31 +127,27 @@ func TestDefaultConfigMatchesKeysCaseInsensitively(t *testing.T) {
 	}
 }
 
-func TestUseNumberTakesPrecedenceOverUseInt64(t *testing.T) {
+func TestConflictingNumberModesOnlyPanicWhenDecoding(t *testing.T) {
 	api := Config{UseNumber: true, UseInt64: true}.Froze()
-
-	var nested map[string]interface{}
-	if err := api.Unmarshal([]byte(`{"n":1,"a":[2]}`), &nested); err != nil {
-		t.Fatalf("Unmarshal error = %v", err)
+	if _, err := api.Marshal(1); err != nil {
+		t.Fatal(err)
 	}
-	array, ok := nested["a"].([]interface{})
-	if !ok || len(array) != 1 {
-		t.Fatalf("a = %v (%T), want one-element []interface{}", nested["a"], nested["a"])
-	}
-	if got, ok := nested["n"].(json.Number); !ok || got.String() != "1" {
-		t.Fatalf("nested.n = %v (%T), want json.Number(1)", nested["n"], nested["n"])
-	}
-	if got, ok := array[0].(json.Number); !ok || got.String() != "2" {
-		t.Fatalf("nested.a[0] = %v (%T), want json.Number(2)", array[0], array[0])
-	}
-
-	dec := api.NewDecoder(strings.NewReader(`1`))
-	var streamed interface{}
-	if err := dec.Decode(&streamed); err != nil {
-		t.Fatalf("stream Decode error = %v", err)
-	}
-	if got, ok := streamed.(json.Number); !ok || got.String() != "1" {
-		t.Fatalf("streamed = %v (%T), want json.Number(1)", streamed, streamed)
+	for _, tt := range []struct {
+		name   string
+		decode func()
+	}{
+		{"Unmarshal", func() { var out any; _ = api.Unmarshal([]byte(`1`), &out) }},
+		{"UnmarshalFromString", func() { var out any; _ = api.UnmarshalFromString(`1`, &out) }},
+		{"NewDecoder", func() { api.NewDecoder(strings.NewReader(`1`)) }},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			defer func() {
+				if got := recover(); got != "can't set OptionUseInt64 and OptionUseNumber both!" {
+					t.Fatalf("panic=%v", got)
+				}
+			}()
+			tt.decode()
+		})
 	}
 }
 
@@ -161,7 +157,6 @@ func TestDecoderUseNumberTakesPrecedenceOverFrozenUseInt64(t *testing.T) {
 		cfg  Config
 	}{
 		{name: "use int64", cfg: Config{UseInt64: true}},
-		{name: "both modes", cfg: Config{UseNumber: true, UseInt64: true}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			dec := tt.cfg.Froze().NewDecoder(strings.NewReader(`{"n":1}`))

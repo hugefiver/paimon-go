@@ -156,11 +156,11 @@ func Get(data []byte, path ...interface{}) (ast.Node, error) {
 
 // GetFromString is the string-input form of Get.
 func GetFromString(data string, path ...interface{}) (ast.Node, error) {
-	return doGet([]byte(data), ast.SearchOptions{}, path...)
+	return GetStringWithOptions(data, ast.SearchOptions{}, path...)
 }
 
 // GetCopyFromString is like GetFromString but returns a node that is safe
 // to retain.
 func GetCopyFromString(data string, path ...interface{}) (ast.Node, error) {
-	return doGet([]byte(data), ast.SearchOptions{CopyReturn: true}, path...)
+	return GetStringWithOptions(data, ast.SearchOptions{CopyReturn: true}, path...)
 }

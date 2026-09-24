@@ -15,3 +15,7 @@ func newBackend(_ backend.Config) backend.Backend {
 func selectedGet(data []byte, opts ast.SearchOptions, path ...interface{}) (ast.Node, error) {
 	return fastjsoncompat.Get(data, opts, path...)
 }
+
+func selectedGetString(data string, opts ast.SearchOptions, path ...interface{}) (ast.Node, error) {
+	return fastjsoncompat.GetString(data, opts, path...)
+}

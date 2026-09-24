@@ -106,7 +106,7 @@ func (p *localParser) parseObject(depth int) (Node, nativetypes.ParsingError) {
 	var pairs []Pair
 	if !p.atEnd() && p.src[p.pos] == '}' {
 		p.pos++
-		return NewObject(pairs), 0
+		return newObjectOwned(pairs), 0
 	}
 	for {
 		p.skipSpace()
@@ -138,7 +138,7 @@ func (p *localParser) parseObject(depth int) (Node, nativetypes.ParsingError) {
 			continue
 		case '}':
 			p.pos++
-			return NewObject(pairs), 0
+			return newObjectOwned(pairs), 0
 		default:
 			return Node{}, nativetypes.ERR_INVALID_CHAR
 		}
@@ -151,7 +151,7 @@ func (p *localParser) parseArray(depth int) (Node, nativetypes.ParsingError) {
 	var arr []Node
 	if !p.atEnd() && p.src[p.pos] == ']' {
 		p.pos++
-		return NewArray(arr), 0
+		return newArrayOwned(arr), 0
 	}
 	for {
 		p.skipSpace()
@@ -170,38 +170,41 @@ func (p *localParser) parseArray(depth int) (Node, nativetypes.ParsingError) {
 			continue
 		case ']':
 			p.pos++
-			return NewArray(arr), 0
+			return newArrayOwned(arr), 0
 		default:
 			return Node{}, nativetypes.ERR_INVALID_CHAR
 		}
 	}
 }
 
-// parseNumber scans a JSON number literal. Like Sonic it accepts
-// leading-zero digit runs verbatim ("0123" stays "0123").
+// parseNumber returns the native scanner's first JSON number token.
+// A leading zero ends the integer part; a following digit is trailing input.
 func (p *localParser) parseNumber() (string, nativetypes.ParsingError) {
 	start := p.pos
 	s := p.src
 	if !p.atEnd() && s[p.pos] == '-' {
 		p.pos++
 	}
-	if p.atEnd() || s[p.pos] < '0' || s[p.pos] > '9' {
-		return "", nativetypes.ERR_INVALID_NUMBER_FMT
+	if p.atEnd() {
+		return "", nativetypes.ERR_EOF
 	}
 	if s[p.pos] == '0' {
 		p.pos++
+		if p.atEnd() || (s[p.pos] != '.' && s[p.pos] != 'e' && s[p.pos] != 'E') {
+			return s[start:p.pos], 0
+		}
+	} else if s[p.pos] >= '1' && s[p.pos] <= '9' {
 		for !p.atEnd() && s[p.pos] >= '0' && s[p.pos] <= '9' {
 			p.pos++
 		}
 	} else {
-		for !p.atEnd() && s[p.pos] >= '0' && s[p.pos] <= '9' {
-			p.pos++
-		}
+		return "", nativetypes.ERR_INVALID_CHAR
 	}
 	if !p.atEnd() && s[p.pos] == '.' {
 		p.pos++
 		if p.atEnd() || s[p.pos] < '0' || s[p.pos] > '9' {
-			return "", nativetypes.ERR_INVALID_NUMBER_FMT
+			p.pos--
+			return "", nativetypes.ERR_INVALID_CHAR
 		}
 		for !p.atEnd() && s[p.pos] >= '0' && s[p.pos] <= '9' {
 			p.pos++
@@ -209,30 +212,36 @@ func (p *localParser) parseNumber() (string, nativetypes.ParsingError) {
 	}
 	if !p.atEnd() && (s[p.pos] == 'e' || s[p.pos] == 'E') {
 		p.pos++
-		if !p.atEnd() && isJSONNumberTerminator(s[p.pos]) {
-			return s[start:p.pos], 0
-		}
 		if !p.atEnd() && (s[p.pos] == '+' || s[p.pos] == '-') {
 			p.pos++
 		}
 		if p.atEnd() || s[p.pos] < '0' || s[p.pos] > '9' {
-			return "", nativetypes.ERR_INVALID_NUMBER_FMT
+			p.pos--
+			return "", nativetypes.ERR_INVALID_CHAR
 		}
 		for !p.atEnd() && s[p.pos] >= '0' && s[p.pos] <= '9' {
 			p.pos++
 		}
 	}
+	if !p.atEnd() && isNumberContinuation(s[p.pos]) {
+		return "", nativetypes.ERR_INVALID_CHAR
+	}
 	return s[start:p.pos], 0
 }
 
-// parseString parses a JSON string literal starting at the opening
-// quote. Escapes follow Sonic: \uXXXX unpaired surrogates become
-// U+FFFD; valid surrogate pairs combine; unknown escapes are
-// ERR_INVALID_ESCAPE; raw control bytes are tolerated (documented
-// Sonic-compatible leniency) and passed through unchanged.
 func (p *localParser) parseString() (string, nativetypes.ParsingError) {
 	p.pos++ // consume opening quote
+	start := p.pos
+	for p.pos < len(p.src) && p.src[p.pos] != '\\' {
+		if p.src[p.pos] == '"' {
+			result := p.src[start:p.pos]
+			p.pos++
+			return result, 0
+		}
+		p.pos++
+	}
 	var b strings.Builder
+	b.WriteString(p.src[start:p.pos])
 	s := p.src
 	for !p.atEnd() {
 		c := s[p.pos]
@@ -307,7 +316,7 @@ func (p *localParser) parseString() (string, nativetypes.ParsingError) {
 func (p *localParser) parseUnicodeEscape() (rune, nativetypes.ParsingError) {
 	s := p.src
 	if p.pos+4 > len(s) {
-		return 0, nativetypes.ERR_INVALID_ESCAPE
+		return 0, nativetypes.ERR_INVALID_CHAR
 	}
 	hex := s[p.pos : p.pos+4]
 	p.pos += 4
@@ -323,7 +332,7 @@ func (p *localParser) parseUnicodeEscape() (rune, nativetypes.ParsingError) {
 		case c >= 'A' && c <= 'F':
 			d = rune(c-'A') + 10
 		default:
-			return 0, nativetypes.ERR_INVALID_ESCAPE
+			return 0, nativetypes.ERR_INVALID_CHAR
 		}
 		r = r<<4 | d
 	}

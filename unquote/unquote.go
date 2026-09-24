@@ -1,40 +1,21 @@
-// Package unquote mirrors the public surface of Sonic's v1.15.2 unquote
-// package.
-//
-// The entry points String and IntoBytes decode the *contents* of a JSON
-// string literal: the input is the text between the surrounding JSON
-// quotes, not a fully quoted JSON literal. The decoder accepts ordinary
-// UTF-8 bytes unchanged and decodes the JSON escape sequences "\\", "\"",
-// "\/", "\b", "\f", "\n", "\r", "\t", and "\uXXXX", combining valid
-// UTF-16 surrogate pairs into their single rune form.
-//
-// Errors are reported as
-// github.com/bytedance/sonic/internal/native/types.ParsingError codes:
-//
-//   - ERR_INVALID_ESCAPE: unknown escape letter, truncated escape
-//     sequence, or malformed \uXXXX hex digits.
-//   - ERR_INVALID_UNICODE: a \uXXXX escape is a surrogate that is not
-//     followed by a valid surrogate pair partner (a high surrogate not
-//     followed by a low surrogate, or a low surrogate without a high
-//     surrogate).
-//   - ERR_INVALID_CHAR: a raw control character with code point < 0x20.
-//   - ERR_INVALID_UTF8: an invalid UTF-8 byte sequence outside any escape.
-//   - ERR_UNSUPPORT_TYPE: IntoBytes was called with a nil destination
-//     pointer.
+// Package unquote decodes escaped JSON string contents using Sonic's native
+// byte-preserving semantics. Surrounding quotes are not part of the input.
 package unquote
 
 import (
+	"strings"
 	"unicode/utf16"
 	"unicode/utf8"
 
 	nativetypes "github.com/bytedance/sonic/internal/native/types"
 )
 
-// String unescapes the contents of a JSON string literal. The input is
-// the text between the surrounding JSON quotes; the returned string
-// contains the decoded bytes. A non-zero ParsingError is returned when
-// the input is malformed.
+// String unescapes s. Unpaired UTF-16 surrogates become U+FFFD. Raw bytes,
+// including controls and invalid UTF-8, are retained like Sonic's native API.
 func String(s string) (string, nativetypes.ParsingError) {
+	if !strings.Contains(s, "\\") {
+		return s, 0
+	}
 	dst := make([]byte, 0, len(s))
 	if code := decodeStringContent(s, &dst); code != 0 {
 		return "", code
@@ -42,40 +23,37 @@ func String(s string) (string, nativetypes.ParsingError) {
 	return string(dst), 0
 }
 
-// IntoBytes unescapes the contents of a JSON string literal into the
-// buffer pointed to by m. The destination slice is reset to length 0
-// before any decoded bytes are appended, so callers can reuse the same
-// backing array across calls. If m is nil, IntoBytes returns
-// ERR_UNSUPPORT_TYPE rather than panicking.
+// IntoBytes decodes into the caller's storage. Capacity must be at least
+// len(s); insufficient capacity returns ERR_EOF without changing the slice.
+// On a malformed escape, the original length is preserved, although the
+// underlying storage may already contain the successfully decoded prefix.
 func IntoBytes(s string, m *[]byte) nativetypes.ParsingError {
 	if m == nil {
 		return nativetypes.ERR_UNSUPPORT_TYPE
 	}
-	*m = (*m)[:0]
-	return decodeStringContent(s, m)
+	if cap(*m) < len(s) {
+		return nativetypes.ERR_EOF
+	}
+	dst := (*m)[:0]
+	code := decodeStringContent(s, &dst)
+	if code == 0 {
+		*m = dst
+	}
+	return code
 }
 
-// decodeStringContent walks s as JSON string contents and appends the
-// decoded bytes to *dst. It returns a non-zero ParsingError on the first
-// malformed byte or escape encountered.
 func decodeStringContent(s string, dst *[]byte) nativetypes.ParsingError {
-	i := 0
-	for i < len(s) {
-		c := s[i]
-		if c < 0x20 {
-			return nativetypes.ERR_INVALID_CHAR
+	for i := 0; i < len(s); {
+		end := strings.IndexByte(s[i:], '\\')
+		if end < 0 {
+			*dst = append(*dst, s[i:]...)
+			return 0
 		}
-		if c != '\\' {
-			r, size := utf8.DecodeRuneInString(s[i:])
-			if r == utf8.RuneError && size == 1 && s[i] >= 0x80 {
-				return nativetypes.ERR_INVALID_UTF8
-			}
-			*dst = append(*dst, s[i:i+size]...)
-			i += size
-			continue
-		}
-		if i+1 >= len(s) {
-			return nativetypes.ERR_INVALID_ESCAPE
+		end += i
+		*dst = append(*dst, s[i:end]...)
+		i = end
+		if i+1 == len(s) {
+			return nativetypes.ERR_EOF
 		}
 		switch s[i+1] {
 		case '"', '\\', '/':
@@ -110,46 +88,33 @@ func decodeStringContent(s string, dst *[]byte) nativetypes.ParsingError {
 	return 0
 }
 
-// decodeUnicodeEscape decodes a \uXXXX escape beginning at s[i] (s[i] must
-// be '\\'). It also consumes a following \uYYYY escape when the first
-// escape is a UTF-16 high surrogate. It returns the decoded rune, the
-// index in s just past the consumed escape(s), and a non-zero
-// ParsingError when the escape is malformed or the surrogate pairing is
-// invalid.
 func decodeUnicodeEscape(s string, i int) (rune, int, nativetypes.ParsingError) {
+	if len(s)-i < 6 {
+		return 0, 0, nativetypes.ERR_EOF
+	}
 	r, ok := scanHex4(s, i+2)
 	if !ok {
-		return 0, 0, nativetypes.ERR_INVALID_ESCAPE
+		return 0, 0, nativetypes.ERR_INVALID_CHAR
 	}
 	next := i + 6
-	if utf16.IsSurrogate(r) {
-		if !utf16.IsSurrogate(r) || r < 0xD800 || r > 0xDBFF {
-			// A lone low surrogate: invalid Unicode.
-			return 0, 0, nativetypes.ERR_INVALID_UNICODE
+	if r >= 0xD800 && r <= 0xDBFF {
+		if next+6 <= len(s) && s[next] == '\\' && s[next+1] == 'u' {
+			r2, ok := scanHex4(s, next+2)
+			if !ok {
+				return 0, 0, nativetypes.ERR_INVALID_CHAR
+			}
+			if r2 >= 0xDC00 && r2 <= 0xDFFF {
+				return utf16.DecodeRune(r, r2), next + 6, 0
+			}
 		}
-		// Expect a following \uYYYY low surrogate.
-		if next+6 > len(s) || s[next] != '\\' || s[next+1] != 'u' {
-			return 0, 0, nativetypes.ERR_INVALID_UNICODE
-		}
-		r2, ok := scanHex4(s, next+2)
-		if !ok {
-			return 0, 0, nativetypes.ERR_INVALID_ESCAPE
-		}
-		if r2 < 0xDC00 || r2 > 0xDFFF {
-			return 0, 0, nativetypes.ERR_INVALID_UNICODE
-		}
-		decoded := utf16.DecodeRune(r, r2)
-		if decoded == 0xFFFD {
-			return 0, 0, nativetypes.ERR_INVALID_UNICODE
-		}
-		return decoded, next + 6, 0
+		return utf8.RuneError, next, 0
+	}
+	if r >= 0xDC00 && r <= 0xDFFF {
+		return utf8.RuneError, next, 0
 	}
 	return r, next, 0
 }
 
-// scanHex4 decodes a 4-digit hexadecimal sequence beginning at s[i]. It
-// requires s[i:i+4] to be valid and to consist entirely of hex digits.
-// It returns the decoded value and true, or 0 and false on any error.
 func scanHex4(s string, i int) (rune, bool) {
 	if i+4 > len(s) {
 		return 0, false
@@ -159,11 +124,11 @@ func scanHex4(s string, i int) (rune, bool) {
 		c := s[i+j]
 		var v rune
 		switch {
-		case '0' <= c && c <= '9':
+		case c >= '0' && c <= '9':
 			v = rune(c - '0')
-		case 'a' <= c && c <= 'f':
+		case c >= 'a' && c <= 'f':
 			v = rune(c-'a') + 10
-		case 'A' <= c && c <= 'F':
+		case c >= 'A' && c <= 'F':
 			v = rune(c-'A') + 10
 		default:
 			return 0, false

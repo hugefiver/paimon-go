@@ -12,3 +12,7 @@ var _ = sonicBuildTagsSonicStdJSONAndSonicJSONV2AreMutuallyExclusive
 func newBackend(backend.Config) backend.Backend { return nil }
 
 func selectedGet([]byte, ast.SearchOptions, ...interface{}) (ast.Node, error) { return ast.Node{}, nil }
+
+func selectedGetString(string, ast.SearchOptions, ...interface{}) (ast.Node, error) {
+	return ast.Node{}, nil
+}

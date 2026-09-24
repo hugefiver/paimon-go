@@ -225,11 +225,11 @@ func TestConfigUseInt64UnmarshalConvertsNestedInterfaceValues(t *testing.T) {
 	if got, ok := b.(int64); !ok || got != 3 {
 		t.Fatalf("a[1].b = %v (%T), want int64(3)", b, b)
 	}
-	if _, ok := out["f"].(json.Number); !ok {
-		t.Fatalf("f = %v (%T), want json.Number", out["f"], out["f"])
+	if _, ok := out["f"].(float64); !ok {
+		t.Fatalf("f = %v (%T), want float64", out["f"], out["f"])
 	}
-	if _, ok := out["big"].(json.Number); !ok {
-		t.Fatalf("big = %v (%T), want json.Number", out["big"], out["big"])
+	if _, ok := out["big"].(float64); !ok {
+		t.Fatalf("big = %v (%T), want float64", out["big"], out["big"])
 	}
 }
 
@@ -247,40 +247,14 @@ func TestConfigUseInt64StreamDecoderConvertsNestedInterfaceValues(t *testing.T) 
 	}
 }
 
-func TestConfigUseNumberTakesPrecedenceOverUseInt64(t *testing.T) {
-	api := Config{UseNumber: true, UseInt64: true}.Froze()
-
-	var scalar interface{}
-	if err := api.Unmarshal([]byte(`1`), &scalar); err != nil {
-		t.Fatalf("Unmarshal scalar error = %v", err)
-	}
-	if got, ok := scalar.(json.Number); !ok || got.String() != "1" {
-		t.Fatalf("scalar = %v (%T), want json.Number(1)", scalar, scalar)
-	}
-
-	var nested map[string]interface{}
-	if err := api.Unmarshal([]byte(`{"n":1,"a":[2]}`), &nested); err != nil {
-		t.Fatalf("Unmarshal nested error = %v", err)
-	}
-	array, ok := nested["a"].([]interface{})
-	if !ok || len(array) != 1 {
-		t.Fatalf("a = %v (%T), want one-element []interface{}", nested["a"], nested["a"])
-	}
-	if got, ok := nested["n"].(json.Number); !ok || got.String() != "1" {
-		t.Fatalf("nested.n = %v (%T), want json.Number(1)", nested["n"], nested["n"])
-	}
-	if got, ok := array[0].(json.Number); !ok || got.String() != "2" {
-		t.Fatalf("nested.a[0] = %v (%T), want json.Number(2)", array[0], array[0])
-	}
-
-	dec := api.NewDecoder(strings.NewReader(`1`))
-	var streamed interface{}
-	if err := dec.Decode(&streamed); err != nil {
-		t.Fatalf("stream Decode error = %v", err)
-	}
-	if got, ok := streamed.(json.Number); !ok || got.String() != "1" {
-		t.Fatalf("streamed = %v (%T), want json.Number(1)", streamed, streamed)
-	}
+func TestConfigRejectsConflictingNumberModes(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Fatal("decoding must reject UseNumber and UseInt64 together, as Sonic does")
+		}
+	}()
+	var out any
+	_ = Config{UseNumber: true, UseInt64: true}.Froze().Unmarshal([]byte(`1`), &out)
 }
 
 func TestConfigUnmarshalRejectsTrailingGarbageInDecoderBackedPaths(t *testing.T) {

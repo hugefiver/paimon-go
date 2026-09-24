@@ -24,6 +24,9 @@ jobs:
           - name: sonic_jsonv2
             tags: -tags=sonic_jsonv2
             goexperiment: jsonv2
+          - name: default_no_jsonv2
+            tags: ""
+            goexperiment: none
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
@@ -34,6 +37,25 @@ jobs:
         env:
           GOEXPERIMENT: ${{ matrix.goexperiment }}
         run: go test -mod=readonly ${{ matrix.tags }} ./... -count=1
+
+  native-compatibility:
+    name: Native Sonic compatibility and race checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: |
+            go.sum
+            difftest/local/go.sum
+            difftest/upstream/go.sum
+      - name: Check concurrent readers and frozen configurations
+        run: go test -mod=readonly -race ./... -count=1
+      - name: Compare the same consumer against native Sonic and all local backends
+        run: go -C difftest test -mod=readonly ./... -count=1
+      - name: Differential fuzz smoke test
+        run: go -C difftest test -mod=readonly -run='^$' -fuzz='^FuzzUpstreamSonicParity$' -fuzztime=20s -parallel=1
 
   lint:
     name: Lint

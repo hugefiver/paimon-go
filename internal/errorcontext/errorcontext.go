@@ -11,6 +11,20 @@ import (
 // invalid positions show the full source with the caret at the start.
 func SourceDescription(src string, pos int, message string) string {
 	lbound, lwidth, rbound, rwidth := sourceBounds(len(src), pos)
+	return description(src, pos, message, lbound, lwidth, rbound, rwidth)
+}
+
+// ASTSourceDescription also positions the caret immediately after the input
+// for an end-of-input error. Sonic's AST and decoder format this case differently.
+func ASTSourceDescription(src string, pos int, message string) string {
+	if pos != len(src) {
+		return SourceDescription(src, pos, message)
+	}
+	lbound, lwidth, rbound, rwidth := boundedSource(len(src), pos)
+	return description(src, pos, message, lbound, lwidth, rbound, rwidth)
+}
+
+func description(src string, pos int, message string, lbound, lwidth, rbound, rwidth int) string {
 	return fmt.Sprintf(
 		"at index %d: %s\n\n\t%s\n\t%s^%s\n",
 		pos,
@@ -25,6 +39,10 @@ func sourceBounds(size, pos int) (lbound, lwidth, rbound, rwidth int) {
 	if pos >= size || pos < 0 {
 		return 0, 0, size, 0
 	}
+	return boundedSource(size, pos)
+}
+
+func boundedSource(size, pos int) (lbound, lwidth, rbound, rwidth int) {
 	i := 16
 	lbound = pos - i
 	rbound = pos + i

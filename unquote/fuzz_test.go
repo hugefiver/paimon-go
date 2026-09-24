@@ -74,8 +74,12 @@ func FuzzIntoBytesNoPanic(f *testing.F) {
 					t.Fatalf("IntoBytes panicked: %v (s=%q)", r, s)
 				}
 			}()
-			var dst []byte
-			_ = IntoBytes(s, &dst)
+			dst := make([]byte, 0, len(s))
+			code := IntoBytes(s, &dst)
+			want, wantCode := String(s)
+			if code != wantCode || (code == 0 && string(dst) != want) {
+				t.Fatalf("IntoBytes/String disagree: %q,%d vs %q,%d", dst, code, want, wantCode)
+			}
 		}()
 	})
 }

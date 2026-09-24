@@ -455,7 +455,7 @@ func TestCompileCompatibilityUnquote(t *testing.T) {
 	if s, e := unquote.String(`a\/b`); e != 0 || s != "a/b" {
 		t.Fatalf("unquote.String escaped: %q %v", s, e)
 	}
-	var dst []byte
+	dst := make([]byte, 0, len("hello"))
 	if e := unquote.IntoBytes(`hello`, &dst); e != 0 || string(dst) != "hello" {
 		t.Fatalf("unquote.IntoBytes: %q %v", dst, e)
 	}
@@ -812,7 +812,7 @@ func TestPerformanceReviewDocumentationFactLock(t *testing.T) {
 		"`APIKind` 始终等于 `UseSonicJSON`",
 		"原生/JIT",
 		"GOPROXY=off",
-		"fuzz corpus 总数为 7",
+		"原生 Sonic",
 		"](docs/compatibility.md)",
 	} {
 		if !strings.Contains(text, want) {
@@ -901,7 +901,7 @@ func TestFinalReviewDocumentationClaims(t *testing.T) {
 		{
 			path: "encoder/encoder.go",
 			contains: []string{
-				"Encoder.Encode emits a trailing newline only for indented output; StreamEncoder applies the option to suppress its final newline.",
+				"Encoder.Encode, which never appends a newline.",
 			},
 			absent: []string{
 				"Encoder.Encode itself never emits a\n// trailing newline.",
@@ -922,15 +922,15 @@ func TestFinalReviewDocumentationClaims(t *testing.T) {
 			path: "docs/compatibility.md",
 			contains: []string{
 				"Package-level encode, decode, and validation helpers use the separately assignable `fastjson.ConfigDefault`; `Get*` and `Pretouch*` forward to the root package.",
-				"This local `Valid`/`Unmarshal` acceptance is an intentional divergence from the Go 1.27 upstream Sonic fallback, while both implementations' raw AST entry points agree on the raw value.",
+				"The reference is Sonic **v1.15.2's native implementation**",
 			},
 		},
 		{
 			path: "difftest/README.md",
 			contains: []string{
-				"builds direct helper executables once per test process in an owned OS temporary directory using `go build -mod=readonly`, then invokes those executables directly",
+				"using `go build -mod=readonly`",
 				"bounded `Cmd.WaitDelay`",
-				"raw AST entry points agree after invalid UTF-8 in string tokens is normalized to U+FFFD",
+				"Invalid UTF-8 in protocol result strings is normalized by the standard JSON transport",
 			},
 		},
 	} {

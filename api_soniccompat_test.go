@@ -33,8 +33,8 @@ func TestDefaultBuildEnablesObservedRawParserCompatibility(t *testing.T) {
 	if raw, err := n.Raw(); err != nil || raw != "7" {
 		t.Fatalf("Raw() = %q, %v; want first number", raw, err)
 	}
-	if Valid([]byte(`{"a":"\q","b":1}`)) {
-		t.Fatalf(`Valid({"a":"\q","b":1}) = true, want false`)
+	if !Valid([]byte(`{"a":"\q","b":1}`)) {
+		t.Fatalf(`Valid({"a":"\q","b":1}) = false, want true`)
 	}
 	n, err = Get([]byte(`{"a":{"b":"\q"}}`), "a")
 	if err != nil {
@@ -45,91 +45,48 @@ func TestDefaultBuildEnablesObservedRawParserCompatibility(t *testing.T) {
 	}
 }
 
+// These boundaries are witnessed against Sonic v1.15.2's native codec.
+// Its Go 1.27 fallback used a different, more permissive number scanner.
 func TestDefaultBuildMatchesSonicMalformedNumberBoundaries(t *testing.T) {
-	for _, data := range [][]byte{
-		[]byte(`{"a":1.}`),
-		[]byte(`{"a":1e}`),
-		[]byte(`{"a":+1}`),
-		[]byte{'{', '"', 'a', '"', ':', '"', 0x11, 'a', '"', ',', '"', 'b', '"', ':', '1', 'e', '}'},
-	} {
-		if Valid(data) {
-			t.Fatalf("Valid(%q) = true, want false", data)
+	for _, data := range []string{`{"a":01}`, `{"a":1.}`, `{"a":1e}`, `{"a":+1}`, "1e ", "1e,"} {
+		if Valid([]byte(data)) {
+			t.Fatalf("Valid(%q) = true", data)
+		}
+		if _, err := Get([]byte(data)); err == nil {
+			t.Fatalf("Get(%q) accepted an invalid root", data)
 		}
 	}
-
-	for _, data := range [][]byte{
-		[]byte(`{"a":1.}`),
-		[]byte(`{"a":+1}`),
-	} {
-		if _, err := Get(data); err == nil {
-			t.Fatalf("Get(%q) error = nil, want error", data)
+	for _, data := range []string{`{"a":1.}`, `{"a":1e}`, `{"a":+1}`} {
+		if _, err := Get([]byte(data), "a"); err == nil {
+			t.Fatalf("Get(%q, a) accepted an invalid number", data)
 		}
-	}
-	for _, data := range [][]byte{
-		[]byte(`{"a":1e}`),
-		[]byte{'{', '"', 'a', '"', ':', '"', 0x11, 'a', '"', ',', '"', 'b', '"', ':', '1', 'e', '}'},
-	} {
-		n, err := Get(data)
-		if err != nil {
-			t.Fatalf("Get(%q) error = %v, want tolerant raw container", data, err)
-		}
-		if raw, err := n.Raw(); err != nil || raw != string(data) {
-			t.Fatalf("Get(%q).Raw() = %q, %v; want original raw", data, raw, err)
-		}
-	}
-
-	n, err := Get([]byte(`{"a":01}`), "a")
-	if err != nil {
-		t.Fatalf(`Get({"a":01}, "a") error = %v, want nil`, err)
-	}
-	raw, err := n.Raw()
-	if err != nil || raw != "01" {
-		t.Fatalf(`Get({"a":01}, "a").Raw() = %q, %v; want "01", nil`, raw, err)
-	}
-
-	for _, data := range [][]byte{
-		[]byte(`{"a":1.}`),
-		[]byte(`{"a":+1}`),
-	} {
-		if _, err := Get(data, "a"); err == nil {
-			t.Fatalf("Get(%q, a) error = nil, want error", data)
-		}
-	}
-	n, err = Get([]byte(`{"a":1e}`), "a")
-	if err != nil {
-		t.Fatalf(`Get({"a":1e}, a) error = %v, want nil`, err)
-	}
-	if raw, err := n.Raw(); err != nil || raw != "1e" {
-		t.Fatalf(`Get({"a":1e}, a).Raw() = %q, %v; want "1e", nil`, raw, err)
 	}
 }
 
-func TestDefaultBuildPreservesLeadingZeroNumberLiteralsLikeSonic(t *testing.T) {
-	data := []byte(`{"a":0123}`)
-	if Valid(data) {
-		t.Fatalf(`Valid({"a":0123}) = true, want false`)
+func TestDefaultBuildStopsLeadingZeroNumberAtFirstValue(t *testing.T) {
+	const data = `{"a":0123}`
+	if Valid([]byte(data)) {
+		t.Fatal("Valid accepted a leading-zero object member")
 	}
 	for name, fn := range map[string]func() (ast.Node, error){
-		"Get": func() (ast.Node, error) { return Get(data, "a") },
-		"GetWithOptionsValidate": func() (ast.Node, error) {
-			return GetWithOptions(data, ast.SearchOptions{ValidateJSON: true}, "a")
+		"Get":           func() (ast.Node, error) { return Get([]byte(data), "a") },
+		"GetString":     func() (ast.Node, error) { return GetFromString(data, "a") },
+		"GetCopyString": func() (ast.Node, error) { return GetCopyFromString(data, "a") },
+		"Validate": func() (ast.Node, error) {
+			return GetWithOptions([]byte(data), ast.SearchOptions{ValidateJSON: true}, "a")
 		},
+		"Root": func() (ast.Node, error) { return Get([]byte(`0123`)) },
 	} {
-		n, err := fn()
-		if err != nil {
-			t.Fatalf("%s leading-zero error = %v", name, err)
-		}
-		raw, err := n.Raw()
-		if err != nil || raw != "0123" {
-			t.Fatalf("%s leading-zero Raw() = %q, %v; want 0123, nil", name, raw, err)
-		}
-	}
-	n, err := Get([]byte(`0123`))
-	if err != nil {
-		t.Fatalf("Get(0123) error = %v", err)
-	}
-	if raw, err := n.Raw(); err != nil || raw != "0123" {
-		t.Fatalf("Get(0123).Raw() = %q, %v; want 0123, nil", raw, err)
+		t.Run(name, func(t *testing.T) {
+			n, err := fn()
+			if err != nil {
+				t.Fatal(err)
+			}
+			raw, err := n.Raw()
+			if err != nil || raw != "0" {
+				t.Fatalf("raw=%q err=%v, want 0", raw, err)
+			}
+		})
 	}
 }
 

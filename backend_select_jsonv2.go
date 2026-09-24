@@ -76,3 +76,7 @@ func (b jsonv2Backend) NewDecoder(r io.Reader, _ backend.Config) backend.StreamD
 func selectedGet(data []byte, opts ast.SearchOptions, path ...interface{}) (ast.Node, error) {
 	return stdjsonv2.GetWithOptions(data, opts, path...)
 }
+
+func selectedGetString(data string, opts ast.SearchOptions, path ...interface{}) (ast.Node, error) {
+	return stdjsonv2.GetStringWithOptions(data, opts, path...)
+}

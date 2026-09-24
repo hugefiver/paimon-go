@@ -1,6 +1,7 @@
 package fastjsoncompat
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/bytedance/sonic/ast"
@@ -10,7 +11,6 @@ import (
 func TestValidSonicCompatibilityBoundaries(t *testing.T) {
 	for _, input := range [][]byte{
 		[]byte(`{"a":01}`),
-		[]byte(`{"a":"\q","b":1}`),
 	} {
 		if Valid(input) {
 			t.Fatalf("Valid(%q) = true, want false", input)
@@ -20,6 +20,11 @@ func TestValidSonicCompatibilityBoundaries(t *testing.T) {
 		}
 	}
 
+	for _, data := range []string{`"\q"`, `{"a":"\uZZZZ"}`} {
+		if got, want := Valid([]byte(data)), !compatmode.StdJSON; got != want {
+			t.Fatalf("Valid(%q)=%v want %v", data, got, want)
+		}
+	}
 	rawControl := []byte{'{', '"', 'a', '"', ':', '"', 0x11, 'x', '"', '}'}
 	if got, want := Valid(rawControl), !compatmode.StdJSON; got != want {
 		t.Fatalf("Valid(raw control) = %v, want %v", got, want)
@@ -37,20 +42,8 @@ func TestValidSonicCompatibilityBoundaries(t *testing.T) {
 }
 
 func TestGetValidatedBareExponentCompatibility(t *testing.T) {
-	input := []byte(`{"a":{"b":1e}}`)
-	node, err := Get(input, ast.SearchOptions{ValidateJSON: true}, "a")
-	if compatmode.StdJSON {
-		if err == nil {
-			t.Fatal("strict Get(bare exponent) error = nil, want error")
-		}
-		return
-	}
-	if err != nil {
-		t.Fatalf("Get(bare exponent) error = %v", err)
-	}
-	raw, err := node.Raw()
-	if err != nil || raw != `{"b":1e}` {
-		t.Fatalf("Get(bare exponent).Raw() = %q, %v; want raw container", raw, err)
+	if _, err := Get([]byte(`{"a":{"b":1e}}`), ast.SearchOptions{ValidateJSON: true}, "a"); err == nil {
+		t.Fatal("Get accepted an invalid exponent in selected container")
 	}
 }
 
@@ -233,5 +226,43 @@ func TestScanContainerEndSkipsContentsWithinDepthLimit(t *testing.T) {
 				t.Fatalf("scanContainerEnd(depth %d) = %d, %t; want end %d, %t", tt.depth, end, ok, len(data), tt.ok)
 			}
 		})
+	}
+}
+
+func TestStringScannerQuoteBoundaries(t *testing.T) {
+	for _, prefix := range []int{0, 1, 15, 16, 17, 31, 32, 63, 64, 128, 1024} {
+		for slashes := 0; slashes <= 17; slashes++ {
+			for _, extraQuote := range []bool{false, true} {
+				input := `"` + strings.Repeat("x", prefix) + strings.Repeat(`\`, slashes) + `"`
+				if extraQuote {
+					input += `"`
+				}
+				want := (slashes%2 == 0) != extraQuote
+				if got := Valid([]byte(input)); got != want {
+					t.Fatalf("bytes prefix=%d slashes=%d extra=%v: got %v want %v", prefix, slashes, extraQuote, got, want)
+				}
+				if got := ValidString(input); got != want {
+					t.Fatalf("string prefix=%d slashes=%d extra=%v: got %v want %v", prefix, slashes, extraQuote, got, want)
+				}
+			}
+		}
+	}
+}
+
+func TestNativeValidationDepthLimit(t *testing.T) {
+	if compatmode.StdJSON {
+		t.Skip("strict backend uses the standard library depth limit")
+	}
+	for _, depth := range []int{4096, 4097} {
+		for _, leaf := range []string{"", "0"} {
+			input := strings.Repeat("[", depth) + leaf + strings.Repeat("]", depth)
+			want := depth == 4096
+			if got := Valid([]byte(input)); got != want {
+				t.Fatalf("depth=%d leaf=%q Valid=%v", depth, leaf, got)
+			}
+			if got := ValidString(input); got != want {
+				t.Fatalf("depth=%d leaf=%q ValidString=%v", depth, leaf, got)
+			}
+		}
 	}
 }
