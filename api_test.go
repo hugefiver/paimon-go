@@ -153,6 +153,22 @@ func TestNoCopyRawMessageNilUnmarshalError(t *testing.T) {
 	}
 }
 
+// The local API must reject the native upstream's unclosed 32-byte quote run.
+func TestRootRejectsUnclosedQuoteRun(t *testing.T) {
+	data := []byte(`"` + strings.Repeat("0", 32))
+
+	if Valid(data) {
+		t.Fatalf("Valid(%q) = true, want false", data)
+	}
+	var value interface{}
+	if err := Unmarshal(data, &value); err == nil {
+		t.Fatalf("Unmarshal(%q) error = nil, want strict rejection", data)
+	}
+	if _, err := Get(data); err == nil {
+		t.Fatalf("Get(%q) error = nil, want strict rejection", data)
+	}
+}
+
 func TestASTSyntaxErrorUsesSourceDescription(t *testing.T) {
 	err := ast.SyntaxError{Pos: 2, Src: "xx?yy", Msg: "bad"}
 	const want = "Syntax error at index 2: bad\n\n\txx?yy\n\t..^..\n"

@@ -591,6 +591,74 @@ func hasRawControlInStringToken(data string) bool {
 	return hasRawControl && !inString && !escaped && json.Valid(normalized)
 }
 
+// upstreamTolerantQuoteRun selects only the native Go 1.26 discrepancy for
+// unclosed root strings of 32-byte printable ASCII runs (after JSON whitespace).
+func upstreamTolerantQuoteRun(data string) (quotePos int, ok bool) {
+	i := firstJSONValueOffset([]byte(data))
+	if i >= len(data) || data[i] != '"' {
+		return 0, false
+	}
+	content := data[i+1:]
+	if len(content) == 0 || len(content)%32 != 0 {
+		return 0, false
+	}
+	for k := 0; k < len(content); k++ {
+		b := content[k]
+		if b < 0x20 || b > 0x7e || b == '"' || b == '\\' {
+			return 0, false
+		}
+	}
+	return i, true
+}
+
+func expectedStrictlyRejectedResult(data string) result {
+	return result{
+		EncoderValidStart:  len(data) - 1,
+		PreorderOnlyNumber: `["error"]`,
+		NewRawType:         1,
+	}
+}
+
+// Native normalization drops the final content byte and closes the string;
+// raw lookups retain the unterminated input after its optional whitespace.
+func expectedUpstreamTolerantResult(data string, quotePos int, path []pathPart) result {
+	rootRaw := data[quotePos:]
+	res := result{
+		Valid:              true,
+		EncoderValid:       true,
+		EncoderValidStart:  quotePos,
+		UnmarshalOK:        true,
+		MarshalOK:          true,
+		Normalized:         rootRaw[:len(rootRaw)-1] + `"`,
+		GetRootOK:          true,
+		GetRootRaw:         rootRaw,
+		PreorderOnlyNumber: "null",
+		NewRawType:         7,
+	}
+	if len(path) == 0 {
+		res.GetPathOK = true
+		res.GetPathRaw = rootRaw
+		res.SearcherPathOK = true
+		res.SearcherPathRaw = rootRaw
+	}
+	return res
+}
+
+func tolerantQuoteRunParityError(data string, quotePos int, path []pathPart, local, upstream result) error {
+	strict := expectedStrictlyRejectedResult(data)
+	if local != strict {
+		return fmt.Errorf("tolerated quote run: local = %+v, want strict rejection %+v\ndata: %q\npath: %+v", local, strict, data, path)
+	}
+	if upstream == strict {
+		return nil
+	}
+	tolerant := expectedUpstreamTolerantResult(data, quotePos, path)
+	if upstream != tolerant {
+		return fmt.Errorf("tolerated quote run: upstream = %+v, want verified mis-acceptance %+v\ndata: %q\npath: %+v", upstream, tolerant, data, path)
+	}
+	return nil
+}
+
 func FuzzUpstreamSonicParity(f *testing.F) {
 	for _, seed := range []string{
 		"null",
@@ -631,6 +699,12 @@ func FuzzUpstreamSonicParity(f *testing.F) {
 		upstream := runHelper(t, filepath.Join("upstream"), req)
 		if isRawControl {
 			assertRawControlParity(t, data, local, upstream)
+			return
+		}
+		if quotePos, tolerant := upstreamTolerantQuoteRun(data); tolerant {
+			if err := tolerantQuoteRunParityError(data, quotePos, req.Path, local, upstream); err != nil {
+				t.Fatal(err)
+			}
 			return
 		}
 		if !reflect.DeepEqual(local, upstream) {
@@ -1074,6 +1148,91 @@ func TestHasRawControlInStringToken(t *testing.T) {
 				t.Fatalf("hasRawControlInStringToken(%q) = true, want false", data)
 			}
 		})
+	}
+}
+
+func TestUpstreamTolerantQuoteRunClassification(t *testing.T) {
+	for _, tt := range []struct {
+		name, data string
+		quotePos   int
+		ok         bool
+	}{
+		{name: "ci input", data: `"` + strings.Repeat("0", 32), ok: true},
+		{name: "64 bytes", data: `"` + strings.Repeat("a", 64), ok: true},
+		{name: "printable punctuation", data: `"` + strings.Repeat("a<>&", 8), ok: true},
+		{name: "leading json whitespace", data: " \t\r\n" + `"` + strings.Repeat("0", 32), ok: true, quotePos: 4},
+		{name: "31 bytes content", data: `"` + strings.Repeat("0", 31)},
+		{name: "33 bytes content", data: `"` + strings.Repeat("0", 33)},
+		{name: "closed string", data: `"` + strings.Repeat("0", 32) + `"`},
+		{name: "inner quote", data: `"` + strings.Repeat("a", 31) + `"`},
+		{name: "backslash", data: `"` + strings.Repeat("a", 31) + `\`},
+		{name: "raw control", data: `"` + strings.Repeat("a", 31) + "\x11"},
+		{name: "invalid utf8", data: `"` + strings.Repeat("a", 31) + "\xff"},
+		{name: "unicode", data: `"` + strings.Repeat("a", 30) + "é"},
+		{name: "del", data: `"` + strings.Repeat("a", 31) + "\x7f"},
+		{name: "container", data: `{"x":` + `"` + strings.Repeat("a", 32)},
+		{name: "non-json prefix", data: "\v" + `"` + strings.Repeat("a", 32)},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			quotePos, ok := upstreamTolerantQuoteRun(tt.data)
+			if ok != tt.ok || (ok && quotePos != tt.quotePos) {
+				t.Fatalf("upstreamTolerantQuoteRun(%q) = (%d, %t), want (%d, %t)", tt.data, quotePos, ok, tt.quotePos, tt.ok)
+			}
+		})
+	}
+}
+
+func TestTolerantQuoteRunParity(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		data string
+		path []pathPart
+	}{
+		{name: "ci input empty path", data: `"` + strings.Repeat("0", 32)},
+		{name: "ci input non-empty path", data: `"` + strings.Repeat("0", 32), path: []pathPart{{Kind: "key", Key: "x"}}},
+		{name: "mixed printable 64 bytes", data: `"` + strings.Repeat("a<>&~ !?", 8), path: []pathPart{{Kind: "index", Index: 0}}},
+		{name: "whitespace prefix", data: " \t\r\n" + `"` + strings.Repeat("a", 32)},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			req := request{Data: base64.StdEncoding.EncodeToString([]byte(tt.data)), Path: tt.path}
+			local := runHelper(t, filepath.Join("local"), req)
+			upstream := runHelper(t, filepath.Join("upstream"), req)
+			quotePos, ok := upstreamTolerantQuoteRun(tt.data)
+			if !ok {
+				t.Fatalf("unclassified targeted input %q", tt.data)
+			}
+			if err := tolerantQuoteRunParityError(tt.data, quotePos, tt.path, local, upstream); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestTolerantQuoteRunOracleRejectsSharedCorruption(t *testing.T) {
+	data := `"` + strings.Repeat("0", 32)
+	strict := expectedStrictlyRejectedResult(data)
+	tolerant := expectedUpstreamTolerantResult(data, 0, nil)
+	if want := `"` + strings.Repeat("0", 31) + `"`; tolerant.Normalized != want {
+		t.Fatalf("independent normalized template = %q, want %q", tolerant.Normalized, want)
+	}
+	if err := tolerantQuoteRunParityError(data, 0, nil, tolerant, tolerant); err == nil {
+		t.Fatal("accepted identical tolerant results on both sides")
+	}
+	corrupted := strict
+	corrupted.NewRawType = 7
+	if err := tolerantQuoteRunParityError(data, 0, nil, corrupted, corrupted); err == nil {
+		t.Fatal("accepted identical corrupted rejection on both sides")
+	}
+	if err := tolerantQuoteRunParityError(data, 0, nil, strict, strict); err != nil {
+		t.Fatalf("rejected identical strict results: %v", err)
+	}
+	if err := tolerantQuoteRunParityError(data, 0, nil, strict, tolerant); err != nil {
+		t.Fatalf("rejected verified tolerant upstream result: %v", err)
+	}
+	corrupted = tolerant
+	corrupted.Normalized = `"` + strings.Repeat("0", 30) + `"`
+	if err := tolerantQuoteRunParityError(data, 0, nil, strict, corrupted); err == nil {
+		t.Fatal("accepted upstream normalized value with wrong byte count")
 	}
 }
 
